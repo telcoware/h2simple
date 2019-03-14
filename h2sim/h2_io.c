@@ -1040,9 +1040,9 @@ void h2_ctx_run(h2_ctx *ctx) {
     struct epoll_event *e = epe;
     for ( ; r > 0; r--, e++) {
       int events = e->events;
-      if (((h2_obj *)epe->data.ptr)->cls == &h2_cls_svr) {
+      if (((h2_obj *)e->data.ptr)->cls == &h2_cls_svr) {
         /* server acccept event */
-        h2_svr *svr = (void *)epe->data.ptr;
+        h2_svr *svr = (void *)e->data.ptr;
         if ((events & EPOLLIN)) {
           struct sockaddr sa;
           socklen_t sa_len = sizeof(sa);  /* in/out argument */
@@ -1054,9 +1054,9 @@ void h2_ctx_run(h2_ctx *ctx) {
             warnx("accept() failed on server socket: %s", strerror(errno));
           }
         }
-      } else if (((h2_obj *)epe->data.ptr)->cls == &h2_cls_sess) {
+      } else if (((h2_obj *)e->data.ptr)->cls == &h2_cls_sess) {
         /* session rw event */
-        h2_sess *sess = (void *)epe->data.ptr;
+        h2_sess *sess = (void *)e->data.ptr;
         if ((events & EPOLLIN)) {
           if (h2_sess_recv(sess) < 0) {
             h2_sess_free(sess);
