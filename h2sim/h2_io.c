@@ -1023,6 +1023,9 @@ void h2_ctx_run(h2_ctx *ctx) {
         break;
       }
     }
+    if (epe_max <= 0) {
+      break;  /* no more session to service */
+    }
 
     /* wait for epoll event */
     int r = epoll_wait(ctx->epoll_fd, epe, epe_max, 100);
