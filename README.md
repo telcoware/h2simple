@@ -10,7 +10,7 @@ Nghttp2 has as nice and clean event modeled C api,
 But the the http client/server code in nghttp2 pacakge
 are built on C++/boost, not for clean C users.
 
-So new HTTP2 stack layer for standalone C is built, named: h2 simple
+So new HTTP2 stack layer for standalone C is built, named http2simple.
 And goes with client and server simulator example code.
 
 
@@ -135,7 +135,7 @@ client for tcp 1k/4k/10k  performance test:
   -m POST -u http://127.0.0.1:8080/user10k/__MDN__   \
           -x content-type=application/json -e 10k -q
 ```
---> TCP 1K/4K/10K TPS = 110K/75K/50K at Xeon Gold 6132 CPU @ 2.60GHz
+--> TCP 1K/4K/10K TPS = 120K/80K/55K at Xeon Gold 6132 CPU @ 2.60GHz
 
 client for tls 1k/4k/10k  performance test:
 ```

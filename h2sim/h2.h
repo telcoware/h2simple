@@ -190,22 +190,27 @@ int h2_send_push_promise(h2_sess *sess, h2_strm *strm,
 
 /* Server Accept Session API Calls and Callbacks ------------------------- */
 
-typedef int (*h2_accept_cb)(const char *authority, void *svr_user_data,
+typedef int (*h2_accept_cb)(h2_svr *svr, void *svr_user_data,
                     const char *peer_ip, unsigned short peer_port,
                     /* return parameters for accepted sess */
+                    SSL_CTX **sess_ssl_ctx_ret,
                     h2_request_cb *request_cb_ret,
                     h2_sess_free_cb *sess_free_cb_ret,
                     void **sess_user_data_ret);
   /* returns: 0(ok), <0(error; close session) */
   /* on ok, set *sess_free_cb_ret for *sess_user_data_ret for accepted sess */
   /* else *sess_free_cb_ret and *sess_user_data_ret are ignored */ 
-
+  /* if *sess_ssl_ctx_ret is set non NULL, it is used instead of svr_ssl_ctx */
+ 
 /* server listen socket binding api; authority is key as well as binding addr */
 h2_svr *h2_listen(h2_ctx *ctx, const char *authority, SSL_CTX *svr_ssl_ctx,
                   h2_accept_cb accept_cb,
                   h2_svr_free_cb svr_free_cb, void *svr_user_data);
 void h2_svr_free(h2_svr *svr);
   /* removes listen socket only; connected session are not affected */
+
+const char *h2_svr_authority(h2_svr *svr);
+SSL_CTX *h2_svr_ssl_ctx(h2_svr *svr);
 
 
 /* H2 Service Context ---------------------------------------------------- */

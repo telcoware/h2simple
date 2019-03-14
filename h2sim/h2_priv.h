@@ -67,8 +67,9 @@ typedef struct h2_sbuf {
   /* CAUTION: char[sbuf_size] MUST BE ALLOCATED after h2_sbuf */
 } h2_sbuf;
 
-void h2_sbuf_init(h2_sbuf *sbuf, int buf_size, int ext_step_size);
-void h2_sbuf_clean(h2_sbuf *sbuf);  /* frees used data and clean to init */
+/* sbuf is to be used ONLY in h2_msg */
+/*void h2_sbuf_init(h2_sbuf *sbuf, int buf_size, int ext_step_size); */
+/*void h2_sbuf_clean(h2_sbuf *sbuf); */  /* frees used data and clean to init */
 
 char *h2_sbuf_put(h2_sbuf *sbuf, const char *str);
 char *h2_sbuf_put_n(h2_sbuf *sbuf, const char *str, int str_len);
@@ -82,8 +83,8 @@ char *h2_sbuf_put_n(h2_sbuf *sbuf, const char *str, int str_len);
  */
 
 #define H2_MSG_HDR_MAX        32  /* TODO: TO BE UNLIMITED */
-#define H2_MSG_SBUF_SIZE      (8 * 1024 - 584)
-#define H2_MSG_SBUF_EXT_STEP  4096
+#define H2_MSG_SBUF_SIZE      (4 * 1024 - 596/*h2_msg*/)
+#define H2_MSG_SBUF_EXT_STEP  (4 * 1024 - 16/*h2_xbuf*/)
 
 
 /* h2 msg type */

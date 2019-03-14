@@ -181,20 +181,27 @@ int request_cb(h2_sess *sess, h2_strm *strm,
   return (rs < 0)? -1 : 0;
 }
 
-int accept_cb(const char *authority, void *server_user_data,
+int accept_cb(h2_svr *svr, void *server_user_data,
               const char *peer_ip, unsigned short peer_port,
-              h2_request_cb *request_cb_ret,
+              SSL_CTX **ssl_ctx_ret, h2_request_cb *request_cb_ret,
               h2_sess_free_cb *sess_free_cb_ret, void **sess_user_data_ret) {
-  (void)authority;
+  (void)svr;
   (void)peer_ip;
   (void)peer_port;
 
   /* set accepted session paramters */
+  *ssl_ctx_ret = NULL/* use svr_ssl_ctx */;
   *request_cb_ret = request_cb;
   *sess_free_cb_ret = NULL/* static user data */;
   *sess_user_data_ret = server_user_data/* app_ctx * */; 
-
   return 0;
+}
+
+void svr_free_cb(h2_svr *svr, void *svr_user_data) {
+  (void)svr_user_data; 
+  if (h2_svr_ssl_ctx(svr)) {
+    SSL_CTX_free(h2_svr_ssl_ctx(svr));
+  }
 }
 
 
@@ -305,7 +312,8 @@ int main(int argc, char **argv) {
         fprintf(stderr, "unknown server binding format: %s\n", optarg);
         return EXIT_FAILURE;
       }
-      if (!h2_listen(ctx, authority, ssl_ctx, accept_cb, NULL, &app_ctx)) {
+      if (!h2_listen(ctx, authority, ssl_ctx, accept_cb,
+                     svr_free_cb, &app_ctx)) {
         fprintf(stderr, "server binding failed; quit: %s\n", authority);
         return EXIT_FAILURE;
       }
@@ -459,9 +467,7 @@ int main(int argc, char **argv) {
   } 
 
 #ifdef TLS_MODE
-  /* garbage ssl_ctx's are left */
-  //SSL_CTX_free(ssl_ctx);
-  //ERR_free_strings();
+  ERR_free_strings();
 #endif
 
   return 0;

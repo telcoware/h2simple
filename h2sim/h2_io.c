@@ -663,6 +663,21 @@ static h2_sess *h2_server_accept(h2_ctx *ctx, h2_svr *svr, int fd,
   }
   unsigned short port = atoi(serv);
 
+  /* call user accept callback */
+  SSL_CTX *sess_ssl_ctx = NULL;
+  if (svr->accept_cb) {
+    int r = svr->accept_cb(svr, svr->user_data, host, port,
+                           &sess_ssl_ctx, &sess->request_cb,
+                           &sess->sess_free_cb, &sess->user_data);
+    if (r < 0) {
+      warnx("%saccept_cb failed: %d", sess->log_prefix, r);
+      sess->sess_free_cb = NULL;
+      sess->user_data = NULL;
+      h2_sess_free(sess);
+      return NULL;
+    }
+  }
+
   /* do blocking, no wait send */
   int v = 1;
   setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &v, sizeof(v));
@@ -670,7 +685,7 @@ static h2_sess *h2_server_accept(h2_ctx *ctx, h2_svr *svr, int fd,
 
 #ifdef TLS_MODE
   if (svr->ssl_ctx) {
-    sess->ssl = SSL_new(svr->ssl_ctx);
+    sess->ssl = SSL_new((sess_ssl_ctx)? sess_ssl_ctx : svr->ssl_ctx);
     if (!sess->ssl) {
       warnx("%scannot create ssl session: %s",
             sess->log_prefix, ERR_error_string(ERR_get_error(), NULL));
@@ -701,20 +716,6 @@ static h2_sess *h2_server_accept(h2_ctx *ctx, h2_svr *svr, int fd,
   int f = fcntl(sess->fd, F_GETFL, 0);
   if (f != -1) {
     fcntl(sess->fd, F_SETFL, f | O_NONBLOCK);
-  }
-
-  /* call user accept callback */
-  if (svr->accept_cb) {
-    int r = svr->accept_cb(svr->authority, svr->user_data, host, port,
-                           &sess->request_cb,
-                           &sess->sess_free_cb, &sess->user_data);
-    if (r < 0) {
-      warnx("%saccept_cb failed: %d", sess->log_prefix, r);
-      sess->sess_free_cb = NULL;
-      sess->user_data = NULL;
-      h2_sess_free(sess);
-      return NULL;
-    }
   }
 
   return sess;
@@ -829,6 +830,14 @@ void h2_svr_free(h2_svr *svr) {
   svr->authority = NULL;
 
   free(svr);
+}
+
+const char *h2_svr_authority(h2_svr *svr) {
+  return (svr)? svr->authority : NULL;
+}
+
+SSL_CTX *h2_svr_ssl_ctx(h2_svr *svr) {
+  return (svr)? svr->ssl_ctx : NULL;
 }
 
 

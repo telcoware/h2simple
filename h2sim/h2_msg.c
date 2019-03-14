@@ -63,14 +63,14 @@ const char *h2_msg_type_str(int msg_type) {
  * Message String Buffer Utility --------------------------------------------
  */
 
-void h2_sbuf_init(h2_sbuf *sbuf, int buf_size, int ext_step_size) {
+inline void h2_sbuf_init(h2_sbuf *sbuf, int buf_size, int ext_step_size) {
   sbuf->ext_step_size = ext_step_size;
   sbuf->xbuf.next = NULL;
   sbuf->xbuf.size = buf_size;
   sbuf->xbuf.free = buf_size;
 }
 
-void h2_sbuf_clean(h2_sbuf *sbuf) {
+inline void h2_sbuf_clean(h2_sbuf *sbuf) {
   if (sbuf) {
     h2_xbuf *xbuf;
     while ((xbuf = sbuf->xbuf.next)) {
