@@ -32,7 +32,6 @@
 #include <signal.h>
 #include <errno.h>
 #include <ctype.h>
-#include <poll.h>
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/socket.h> 
@@ -41,6 +40,11 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <netdb.h>
+#ifdef EPOLL_MODE
+#include <sys/epoll.h>
+#else
+#include <poll.h>
+#endif
 
 #ifdef TLS_MODE
 #include <openssl/ssl.h>
@@ -146,7 +150,26 @@ SSL_CTX *h2_ssl_ctx_init(int is_server/* else client */,
 
 
 /*
- * IO Utilities -------------------------------------------------------------
+ * File Control Flag Utilities ---------------------------------------------
+ */
+
+static void h2_set_nonblock(int fd) {
+  int v;
+  if ((v = fcntl(fd, F_GETFL, 0)) != -1) {
+    fcntl(fd, F_SETFL, v | O_NONBLOCK);
+  }
+}
+
+static void h2_set_close_exec(int fd) {
+  int v;
+  if ((v = fcntl(fd, F_GETFD, 0)) != -1) {
+    fcntl(fd, F_SETFD, v | FD_CLOEXEC);
+  }
+}
+
+
+/*
+ * Session Send ------------------------------------------------------------
  */
 
 /*
@@ -158,7 +181,32 @@ SSL_CTX *h2_ssl_ctx_init(int is_server/* else client */,
  * - tcp MTU: 1360 or less; cf. some public CPs site has MTU 1360
  */
 
-static inline int h2_wr_buf_pending(h2_wr_buf *wr_buf) {
+
+inline void h2_sess_mark_send_pending(h2_sess *sess) {
+  if (!sess->send_pending) {
+#ifdef EPOLL_MODE
+    struct epoll_event e;
+    e.events = EPOLLIN | EPOLLOUT;
+    e.data.ptr = &sess->obj;
+    epoll_ctl(sess->fd, EPOLL_CTL_MOD, sess->fd, &e);
+#endif
+    sess->send_pending = 1;
+  }
+}
+
+inline void h2_sess_clear_send_pending(h2_sess *sess) {
+  if (sess->send_pending) {
+#ifdef EPOLL_MODE
+    struct epoll_event e;
+    e.events = EPOLLIN | EPOLLOUT;
+    e.data.ptr = &sess->obj;
+    epoll_ctl(sess->fd, EPOLL_CTL_MOD, sess->fd, &e);
+#endif
+    sess->send_pending = 0;
+  }
+}
+
+inline int h2_wr_buf_pending(h2_wr_buf *wr_buf) {
   return wr_buf->merge_size + wr_buf->mem_send_size;
 }
 
@@ -168,13 +216,16 @@ static int h2_sess_send_once(h2_sess *sess) {
 #ifdef TLS_MODE
   SSL *ssl = sess->ssl;
 #endif
+#ifdef EPOLL_MODE
+  int mem_send_zero = 0;
+#endif
 
   /* NOTE: send is always blocking */
   /* TODO: save and retry to send on last to_send data */
 
   if (wb->merge_size > 0 && wb->mem_send_size > 0) {
-    warnx("### DEBUG: REENTRY WITH REMAINING WRITE: merge_size=%d mem_send_size=%d",
-          wb->merge_size, wb->mem_send_size);
+    warnx("### DEBUG: REENTRY WITH REMAINING WRITE: "
+          "merge_size=%d mem_send_size=%d", wb->merge_size, wb->mem_send_size);
   }
 
   while (wb->mem_send_size <= 0 && wb->merge_size < H2_WR_BUF_SIZE) {
@@ -193,6 +244,9 @@ static int h2_sess_send_once(h2_sess *sess) {
       return -1;
     } else if (mem_send_size == 0) {
       /* no more data to send */
+#ifdef EPOLL_MODE
+      mem_send_zero = 1;
+#endif
       break;
     } else if (wb->merge_size + mem_send_size <= (int)sizeof(wb->merge_data)) {
       /* merge to buf */
@@ -216,6 +270,9 @@ static int h2_sess_send_once(h2_sess *sess) {
       sent = SSL_write(ssl, wb->merge_data, wb->merge_size);
       if (sent <= 0) {
         if (SSL_get_error(ssl, sent) == SSL_ERROR_WANT_WRITE) {
+          fprintf(stderr, "DEBUG: TLS SEND merge_data WOULD BLOCK: "
+                  "to_send=%d\n", (int)wb->merge_size);
+          h2_sess_mark_send_pending(sess);
           return total_sent;  /* retry later */
         }
         warnx("SSL_write(merge_data) error: %d", SSL_get_error(ssl, sent));
@@ -229,9 +286,9 @@ static int h2_sess_send_once(h2_sess *sess) {
       if (sent <= 0) {
         // note: in linux EAGAIN=EWHOULDBLOCK but some oldes are not */
         if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-          /* DEBUG: to check merge_size and mem_send size */
-          fprintf(stderr, "TCP SEND merge_data WOULD BLOCK: to_send=%d\n",
-                  (int)wb->merge_size);
+          fprintf(stderr, "DEBUG: TCP SEND merge_data WOULD BLOCK: "
+                  "to_send=%d\n", (int)wb->merge_size);
+          h2_sess_mark_send_pending(sess);
           return total_sent;
         }
         warnx("send() error with to_send=%d: %s",
@@ -263,6 +320,9 @@ static int h2_sess_send_once(h2_sess *sess) {
       sent = SSL_write(ssl, wb->mem_send_data, wb->mem_send_size);
       if (sent <= 0) {
         if (SSL_get_error(ssl, sent) == SSL_ERROR_WANT_WRITE) {
+          fprintf(stderr, "DEBUG: TLS SEND mem_send_data WOULD BLOCK: "
+                  "to_send=%d\n", (int)wb->mem_send_size);
+          h2_sess_mark_send_pending(sess);
           return total_sent;  /* retry later */
         }
         warnx("SSL_write(mem_send_data) error: %d", SSL_get_error(ssl, sent));
@@ -276,9 +336,9 @@ static int h2_sess_send_once(h2_sess *sess) {
       if (sent <= 0) {
         // note: in linux EAGAIN=EWHOULDBLOCK but some oldes are not */
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
-          /* DEBUG: to check merge_size and mem_send size */
-          fprintf(stderr, "TCP SEND mem_send_data WOULD BLOCK: to_send=%d\n",
-                  (int)wb->mem_send_size);
+          fprintf(stderr, "DEBUG: TCP SEND mem_send_data WOULD BLOCK: "
+                  "to_send=%d\n", (int)wb->mem_send_size);
+          h2_sess_mark_send_pending(sess);
           return total_sent;
         }
         warnx("send() error with to_send=%d: %s",
@@ -305,11 +365,22 @@ static int h2_sess_send_once(h2_sess *sess) {
   }
 
   if (total_sent == 0) {
+    h2_sess_clear_send_pending(sess);
+    /*
     static int c = 0;
     c++;
-    //warnx("### DEBUG: [%d] EXIT WITHOUT SENT DATA: merge_size=%d mem_send_size=%d",
-    //      c, wb->merge_size, wb->mem_send_size);
+    warnx("### DEBUG: [%d] EXIT WITHOUT SENT DATA: merge_size=%d "
+          "mem_send_size=%d", c, wb->merge_size, wb->mem_send_size);
+    */
   }
+
+#if EPOLL_MODE
+  if (mem_send_zero && !nghttp2_session_want_read(sess->ng_sess)) {
+    sess->close_reason = CLOSE_BY_NGHTTP2_END;
+    return -6;
+  }
+#endif
+
   return total_sent;
 }
 
@@ -378,6 +449,7 @@ static h2_sess *h2_sess_init_client(h2_ctx *ctx, SSL *ssl,
                                     int fd, const char *authority) {
 
   h2_sess *sess = calloc(1, sizeof(h2_sess));
+  sess->obj.cls = &h2_cls_sess;
 
   /* insert into ctx session list */
   sess->next = ctx->sess_list_head.next;
@@ -415,6 +487,17 @@ static h2_sess *h2_sess_init_client(h2_ctx *ctx, SSL *ssl,
     strcat(sess->log_prefix, " ");
   }
   
+#ifdef EPOLL_MODE
+  struct epoll_event e;
+  e.events = EPOLLIN;
+  e.data.ptr = &sess->obj;
+  if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, sess->fd, &e) < 0) {
+    warnx("sess client init failed for epoll_ctl() error: %s", strerror(errno));
+    h2_sess_free(sess);
+    return NULL;
+  }
+#endif
+
   h2_sess_nghttp2_init(sess);
 
   /* mark start time */
@@ -492,14 +575,9 @@ static h2_sess *h2_sess_client_start(int sock, h2_ctx *ctx,
     return NULL;
   }
 
-  /* set socket noblocking */
-  int f = fcntl(sock, F_GETFL, 0);
-  if (f != -1) {
-    fcntl(sock, F_SETFL, f | O_NONBLOCK);
-  }
+  h2_set_nonblock(sock);
 
   fprintf(stderr, "%sCONNECTED\n", sess->log_prefix);
-
   return sess;
 }
 
@@ -548,13 +626,16 @@ h2_sess *h2_connect(h2_ctx *ctx, const char *authority, SSL_CTX *cli_ssl_ctx,
   h2_sess *sess = NULL;
   for (ai = res; ai; ai = ai->ai_next) {
     int sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-    if (connect(sock, ai->ai_addr, ai->ai_addrlen) == 0) {
-      /* connect succeeded */
-      if ((sess = h2_sess_client_start(sock, ctx, authority, cli_ssl_ctx))) {
-        break;
+    if (sock >= 0) {
+      h2_set_close_exec(sock);
+      if (connect(sock, ai->ai_addr, ai->ai_addrlen) == 0) {
+        /* connect succeeded */
+        if ((sess = h2_sess_client_start(sock, ctx, authority, cli_ssl_ctx))) {
+          break;
+        }
       }
+      close(sock);
     }
-    close(sock);
   }
   freeaddrinfo(res);
   if (sess == NULL) {
@@ -629,12 +710,12 @@ static int h2_sess_server_tls_start(h2_sess *sess)
 }
 #endif
 
-static h2_sess *h2_server_accept(h2_ctx *ctx, h2_svr *svr, int fd, 
-                                 struct sockaddr *addr, socklen_t addrlen) {
-
-  /* MAY NEED TO CALL accept_cb before start session */
+static h2_sess *h2_sess_init_server(h2_ctx *ctx, h2_svr *svr, int fd, 
+                                    struct sockaddr *addr, socklen_t addrlen) {
+  /* NOTE: on error, fd is closed */
 
   h2_sess *sess = calloc(1, sizeof(h2_sess));
+  sess->obj.cls = &h2_cls_sess;
 
   /* insert into ctx session list */
   sess->next = ctx->sess_list_head.next;
@@ -663,6 +744,22 @@ static h2_sess *h2_server_accept(h2_ctx *ctx, h2_svr *svr, int fd,
   }
   unsigned short port = atoi(serv);
 
+  /* do blocking, no wait send */
+  int v = 1;
+  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &v, sizeof(v));
+  sess->fd = fd;
+
+#ifdef EPOLL_MODE
+  struct epoll_event e;
+  e.events = EPOLLIN;
+  e.data.ptr = &sess->obj;
+  if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, sess->fd, &e) < 0) {
+    warnx("sess server init failed for epoll_ctl() error: %s", strerror(errno));
+    h2_svr_free(svr);
+    return NULL;
+  }
+#endif
+
   /* call user accept callback */
   SSL_CTX *sess_ssl_ctx = NULL;
   if (svr->accept_cb) {
@@ -677,11 +774,6 @@ static h2_sess *h2_server_accept(h2_ctx *ctx, h2_svr *svr, int fd,
       return NULL;
     }
   }
-
-  /* do blocking, no wait send */
-  int v = 1;
-  setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &v, sizeof(v));
-  sess->fd = fd;
 
 #ifdef TLS_MODE
   if (svr->ssl_ctx) {
@@ -712,12 +804,7 @@ static h2_sess *h2_server_accept(h2_ctx *ctx, h2_svr *svr, int fd,
     }
   }
 
-  /* set socket noblocking */
-  int f = fcntl(sess->fd, F_GETFL, 0);
-  if (f != -1) {
-    fcntl(sess->fd, F_SETFL, f | O_NONBLOCK);
-  }
-
+  h2_set_nonblock(fd);
   return sess;
 }
 
@@ -753,25 +840,24 @@ h2_svr *h2_listen(h2_ctx *ctx, const char *authority, SSL_CTX *svr_ssl_ctx,
   }
   free(host);
 
-  int sock = -1;
+  int v = 1, sock = -1;
   for (ai = res; ai; ai = ai->ai_next) {
     sock = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-    if (sock < 0) {
-      continue;
-    }
-    int v = 1;
-    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &v, sizeof(v)) < 0) {
-      warnx("setsockopt(SO_REUSEADDR) failed; go ahead: %s",
-            authority);
-    }
-    if (bind(sock, ai->ai_addr, ai->ai_addrlen) == 0) {
-      if (listen(sock, 1024/* TO BE TUNED WITH SYSTEM SOMAXCONN */) == 0) {
-        break;
+    if (sock >= 0) {
+      h2_set_close_exec(sock);
+      if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &v, sizeof(v)) < 0) {
+        warnx("setsockopt(SO_REUSEADDR) failed; go ahead: %s",
+              authority);
       }
-      warnx("Listen failed: %s error=%s", authority, strerror(errno));
+      if (bind(sock, ai->ai_addr, ai->ai_addrlen) == 0) {
+        if (listen(sock, 1024/* TO BE TUNED WITH SYSTEM SOMAXCONN */) == 0) {
+          break;
+        }
+        warnx("Listen failed: %s error=%s", authority, strerror(errno));
+      }
+      close(sock);
+      sock = -1;
     }
-    close(sock);
-    sock = -1;
   }
   freeaddrinfo(res);
   if (sock < 0) {
@@ -782,6 +868,7 @@ h2_svr *h2_listen(h2_ctx *ctx, const char *authority, SSL_CTX *svr_ssl_ctx,
   /* ASSUME: authority is not conflicting for bind() already checked */
 
   h2_svr *svr = calloc(1, sizeof(h2_svr));
+  svr->obj.cls = &h2_cls_svr;
 
   /* insert into ctx server list */
   svr->next = ctx->svr_list_head.next;
@@ -800,6 +887,17 @@ h2_svr *h2_listen(h2_ctx *ctx, const char *authority, SSL_CTX *svr_ssl_ctx,
   svr->accept_cb = accept_cb;
   svr->svr_free_cb = svr_free_cb;
   svr->user_data = svr_user_data;
+
+#ifdef EPOLL_MODE
+  struct epoll_event e;
+  e.events = EPOLLIN;
+  e.data.ptr = &svr->obj;
+  if (epoll_ctl(ctx->epoll_fd, EPOLL_CTL_ADD, svr->accept_fd, &e) < 0) {
+    warnx("svr init failed for epoll_ctl() error: %s", strerror(errno));
+    h2_svr_free(svr);
+    return NULL;
+  }
+#endif
 
   fprintf(stderr, "listen %s for http2/%s\n",
           authority, (svr_ssl_ctx)? "tls" : "tcp");
@@ -822,6 +920,9 @@ void h2_svr_free(h2_svr *svr) {
   svr->ctx->svr_num--;
 
   if (svr->accept_fd >= 0) {
+#ifdef EPOLL_MODE
+    epoll_ctl(svr->ctx->epoll_fd, EPOLL_CTL_DEL, svr->accept_fd, NULL);
+#endif
     close(svr->accept_fd);
     svr->accept_fd = -1;
   }
@@ -847,6 +948,17 @@ SSL_CTX *h2_svr_ssl_ctx(h2_svr *svr) {
 
 h2_ctx *h2_ctx_init(int verbose) {
   h2_ctx *ctx = calloc(1, sizeof(h2_ctx));
+  ctx->obj.cls = &h2_cls_ctx;
+
+#ifdef EPOLL_MODE
+  ctx->epoll_fd = epoll_create(1/* not used; just non zero */);
+  if (ctx->epoll_fd < 0) {
+    warnx("init failed for epoll create error: %s\n", strerror(errno));
+    free(ctx);
+    return NULL;
+  }
+#endif
+
   ctx->verbose = verbose;
   return ctx;
 }
@@ -867,6 +979,13 @@ void h2_ctx_free(h2_ctx *ctx) {
     sess = next;
   }
 
+#ifdef EPOLL_MODE
+  if (ctx->epoll_fd >= 0) {
+    close(ctx->epoll_fd);
+    ctx->epoll_fd = -1;
+  }
+#endif
+
   free(ctx);
 }
 
@@ -883,26 +1002,107 @@ void h2_ctx_stop(h2_ctx *ctx) {
   }
 }
 
+#ifdef EPOLL_MODE
+
+void h2_ctx_run(h2_ctx *ctx) {
+  ctx->service_flag = 1;
+
+  int epe_max, epe_alloced = 1024;
+  struct epoll_event *epe;  /* dynamic allcoed epoll_event[epe_alloced] */
+  epe = malloc(sizeof(*epe) * epe_alloced); 
+
+  while (ctx->service_flag) {
+    /* prepare poll fd array */
+    epe_max = ctx->sess_num + ctx->svr_num;
+    if (epe_alloced < epe_max) {
+      epe_alloced = ((epe_max + 16 + 1023) / 1024) * 1024;
+      epe = realloc(epe, sizeof(*epe) * epe_alloced); 
+      if (epe == NULL) {
+        warnx("epoll event buffer realloc failed; quit run loop: size=%d",
+              (int)(sizeof(*epe) * epe_alloced));
+        break;
+      }
+    }
+
+    /* wait for epoll event */
+    int r = epoll_wait(ctx->epoll_fd, epe, epe_max, 100);
+    if (r == 0 || (r < 0 && errno == EINTR)) {
+      continue;
+    } else if (r < 0) {
+      warnx("epoll_wait() error; quit run loop: %s", strerror(errno));
+      break;
+    }
+
+    /* check for h2 sess/srv socket */
+    struct epoll_event *e = epe;
+    for ( ; r > 0; r--, e++) {
+      int events = e->events;
+      if (((h2_obj *)epe->data.ptr)->cls == &h2_cls_svr) {
+        /* server acccept event */
+        h2_svr *svr = (void *)epe->data.ptr;
+        if ((events & EPOLLIN)) {
+          struct sockaddr sa;
+          socklen_t sa_len = sizeof(sa);  /* in/out argument */
+          int fd;
+          if ((fd = accept(svr->accept_fd, &sa, &sa_len)) >= 0) {
+            h2_set_close_exec(fd);
+            h2_sess_init_server(ctx, svr, fd, &sa, sa_len);
+          } else {
+            warnx("accept() failed on server socket: %s", strerror(errno));
+          }
+        }
+      } else if (((h2_obj *)epe->data.ptr)->cls == &h2_cls_sess) {
+        /* session rw event */
+        h2_sess *sess = (void *)epe->data.ptr;
+        if ((events & EPOLLIN)) {
+          if (h2_sess_recv(sess) < 0) {
+            h2_sess_free(sess);
+            continue;
+          }
+        }
+        if ((events & (EPOLLOUT | EPOLLIN))) {
+          if (h2_sess_send(sess) < 0) {
+            h2_sess_free(sess);
+            continue;
+          }
+        }
+        if ((events & EPOLLRDHUP)) {
+          warnx("socket closed by peer\n");
+          sess->close_reason = CLOSE_BY_SOCK_EOF;
+          h2_sess_free(sess);
+          continue;
+        }
+        if ((events & (EPOLLERR | EPOLLHUP))) {
+          warnx("socket errored: epoll_events=0x%02x\n", events);
+          sess->close_reason = CLOSE_BY_SOCK_ERR;
+          h2_sess_free(sess);
+          continue;
+        }
+      }
+    }
+  }
+
+  free(epe);
+}
+
+#else /* EPOLL_MODE */
+
 void h2_ctx_run(h2_ctx *ctx) {
   ctx->service_flag = 1;
 
   int pfd_alloced = 1024;
   struct pollfd *pfd = NULL;
-  h2_sess **pfd_sess = NULL;
-  h2_svr **pfd_svr = NULL;
+  h2_obj **pfd_obj = NULL;
   pfd = malloc(sizeof(*pfd) * pfd_alloced); 
-  pfd_sess = malloc(sizeof(*pfd_sess) * pfd_alloced); 
-  pfd_svr = malloc(sizeof(*pfd_svr) * pfd_alloced); 
+  pfd_obj = malloc(sizeof(*pfd_obj) * pfd_alloced); 
 
   while (ctx->service_flag) {
     /* prepare poll fd array */
     if (pfd_alloced < ctx->sess_num + ctx->svr_num) {
       pfd_alloced = ((ctx->sess_num + ctx->svr_num + 16 + 1023) / 1024) * 1024;
       pfd = realloc(pfd, sizeof(*pfd) * pfd_alloced); 
-      pfd_sess = realloc(pfd_sess, sizeof(*pfd_sess) * pfd_alloced); 
-      pfd_svr = realloc(pfd_sess, sizeof(*pfd_svr) * pfd_alloced); 
+      pfd_obj = realloc(pfd_obj, sizeof(*pfd_obj) * pfd_alloced); 
     }
-
     /* fill pollfds and wait for events */
     int n = 0;
     h2_svr *svr;
@@ -910,8 +1110,7 @@ void h2_ctx_run(h2_ctx *ctx) {
       if (svr->accept_fd >= 0) {
         pfd[n].fd = svr->accept_fd;
         pfd[n].events = POLLIN;
-        pfd_sess[n] = NULL;
-        pfd_svr[n] = svr;
+        pfd_obj[n] = &svr->obj;
         n++;
       }
     }
@@ -931,8 +1130,7 @@ void h2_ctx_run(h2_ctx *ctx) {
         h2_sess_free(sess);
         continue;
       }
-      pfd_sess[n] = sess;
-      pfd_svr[n] = NULL;
+      pfd_obj[n] = &sess->obj;
       n++;
     }
     if (n == 0) { /* quit service if nothing to do */
@@ -943,9 +1141,8 @@ void h2_ctx_run(h2_ctx *ctx) {
     int r = poll(pfd, n, 100);
     if (r == 0 || (r < 0 && errno == EINTR)) {
       continue;
-    }
-    else if (r < 0) {
-      warnx("poll() errord: %s", strerror(errno));
+    } else if (r < 0) {
+      warnx("poll() error; quit run loop: %s", strerror(errno));
       break;
     }
 
@@ -956,40 +1153,44 @@ void h2_ctx_run(h2_ctx *ctx) {
         continue;
       }
       r--;
-      if ((svr = pfd_svr[i])) {
+      int revents = pfd[i].revents;
+      if (pfd_obj[i]->cls == &h2_cls_svr) {
         /* server acccept event */
-        if ((pfd[i].revents & POLLIN)) {
+        svr = (void *)pfd_obj[i];
+        if ((revents & POLLIN)) {
           struct sockaddr sa;
           socklen_t sa_len = sizeof(sa);  /* in/out argument */
           int fd;
           if ((fd = accept(svr->accept_fd, &sa, &sa_len)) >= 0) {
-            h2_server_accept(ctx, svr, fd, &sa, sa_len);
+            h2_set_close_exec(fd);
+            h2_sess_init_server(ctx, svr, fd, &sa, sa_len);
           } else {
             warnx("accept() failed on server socket: %s", strerror(errno));
           }
         }
-      } else if ((sess = pfd_sess[i])) {
+      } else if (pfd_obj[i]->cls == &h2_cls_sess) {
         /* session rw event */
-        if ((pfd[i].revents & POLLIN)) {
+        sess = (void *)pfd_obj[i];
+        if ((revents & POLLIN)) {
           if (h2_sess_recv(sess) < 0) {
             h2_sess_free(sess);
             continue;
           }
         }
-        if ((pfd[i].revents & POLLOUT) || (pfd[i].revents & POLLIN)) {
+        if ((revents & (POLLOUT | POLLIN))) {
           if (h2_sess_send(sess) < 0) {
             h2_sess_free(sess);
             continue;
           }
         }
-        if ((pfd[i].revents & POLLRDHUP)) {
+        if ((revents & POLLRDHUP)) {
           warnx("socket closed by peer\n");
           sess->close_reason = CLOSE_BY_SOCK_EOF;
           h2_sess_free(sess);
           continue;
         }
-        if ((pfd[i].revents & (POLLERR | POLLHUP | POLLNVAL))) {
-          warnx("socket errored: revents=0x%02x\n", pfd[i].revents);
+        if ((revents & (POLLERR | POLLHUP | POLLNVAL))) {
+          warnx("socket errored: revents=0x%02x\n", revents);
           sess->close_reason = CLOSE_BY_SOCK_ERR;
           h2_sess_free(sess);
           continue;
@@ -999,7 +1200,8 @@ void h2_ctx_run(h2_ctx *ctx) {
   }
 
   free(pfd);
-  free(pfd_sess);
-  free(pfd_svr);
+  free(pfd_obj);
 }
+
+#endif /* EPOLL_MODE */
 

@@ -51,6 +51,31 @@ struct nghttp2_session;
 
 
 /*
+ * H2 object and class definition ------------------------------------------
+ * NOTE: to distinquish h2 entry type
+ */
+
+/* forward declaration */
+typedef struct h2_cls h2_cls;
+
+typedef struct h2_obj {
+  h2_cls *cls;  /* pointer to class object */
+} h2_obj;
+
+typedef struct h2_cls {
+  h2_obj obj;   /* class obj */
+  const char *name;
+} h2_cls;
+
+/* global variables representing the entry class; defined in h2_sess.c */
+extern h2_cls h2_cls_cls;
+extern h2_cls h2_cls_strm;
+extern h2_cls h2_cls_sess;
+extern h2_cls h2_cls_svr;
+extern h2_cls h2_cls_ctx;
+
+
+/*
  * Simple string buffer utility --------------------------------------------
  */
 
@@ -145,6 +170,7 @@ typedef struct h2_read_buf {
 } h2_read_buf;
 
 typedef struct h2_strm {
+  h2_obj obj;
   h2_strm *prev, *next;
 
   int stream_id;
@@ -185,7 +211,15 @@ typedef struct h2_wr_buf {
   int mem_send_size;
 } h2_wr_buf;
 
+/* h2_sess close reason */
+#define CLOSE_BY_SOCK_EOF     (-1)
+#define CLOSE_BY_SOCK_ERR     (-2)
+#define CLOSE_BY_SSL_ERR      (-3)
+#define CLOSE_BY_NGHTTP2_ERR  (-4)
+#define CLOSE_BY_NGHTTP2_END  (-5)
+
 typedef struct h2_sess {
+  h2_obj obj;
   h2_sess *prev, *next;
   h2_strm strm_list_head;
   h2_ctx *ctx;
@@ -194,9 +228,11 @@ typedef struct h2_sess {
   struct nghttp2_session *ng_sess;
   SSL *ssl;                 /* non-NULL for tsl sess only */
   int fd;                   /* connected socket fd */
-  int close_reason;         /* CLOSE_BY_* from "h2_util.h" */
-  h2_wr_buf wr_buf;         /* write buffer for nonblocing send */
+  int close_reason;         /* CLOSE_BY_* */
   char *log_prefix;         /* dynamic alloced */
+
+  h2_wr_buf wr_buf;         /* write buffer for nonblocing send */
+  int send_pending;         /* mark when send skipping by would block */
 
   int stream_close_cnt;
   struct timeval tv_begin;
@@ -221,18 +257,13 @@ typedef struct h2_sess {
 void h2_sess_nghttp2_init(h2_sess *sess);
 void h2_sess_free(h2_sess *sess);
 
-/* h2_sess close reason */
-#define CLOSE_BY_SOCK_EOF     (-1)
-#define CLOSE_BY_SOCK_ERR     (-2)
-#define CLOSE_BY_SSL_ERR      (-3)
-#define CLOSE_BY_NGHTTP2_ERR  (-4)
-
 
 /*
  * Server Listen Context ---------------------------------------------------
  */
 
 typedef struct h2_svr {
+  h2_obj obj;
   struct h2_svr *prev, *next;
   h2_ctx *ctx;
 
@@ -254,11 +285,16 @@ typedef struct h2_svr {
  */
 
 typedef struct h2_ctx {
+  h2_obj obj;
   h2_sess sess_list_head;
   int sess_num; 
 
   h2_svr svr_list_head;
   int svr_num;
+
+#ifdef EPOLL_MODE
+  int epoll_fd;
+#endif
 
   /* ctx run loop control flag */
   /* set at h2_ctx_run() start, cleared by h2_ctx_stop() */

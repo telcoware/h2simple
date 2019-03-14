@@ -35,11 +35,23 @@
 #include <sys/types.h>
 #include <sys/time.h>    /* for gettimeofday */
 #include <sys/types.h>
+#include <sys/socket.h>  /* for shutdown() */
+#ifdef EPOLL_MODE
+#include <sys/epoll.h>
+#endif
 
 #include <nghttp2/nghttp2.h>
 
 #include "h2.h"
 #include "h2_priv.h"
+
+
+/* global variables representing the entry class */
+h2_cls h2_cls_cls  = { { NULL }, "h2_cls_cls"  };
+h2_cls h2_cls_strm = { { &h2_cls_cls }, "h2_cls_strm" };
+h2_cls h2_cls_sess = { { &h2_cls_cls }, "h2_cls_sess" };
+h2_cls h2_cls_svr  = { { &h2_cls_cls }, "h2_cls_svr"  };
+h2_cls h2_cls_ctx  = { { &h2_cls_cls }, "h2_cls_ctx"  };
 
 
 /*
@@ -91,6 +103,7 @@ static h2_strm *h2_strm_init(h2_sess *sess, int stream_id, int recv_msg_type,
                            h2_strm_free_cb strm_free_cb, void *strm_user_data) {
   /* alloc and init stream data */
   h2_strm *strm = calloc(1, sizeof(h2_strm));
+  strm->obj.cls = &h2_cls_strm;
 
   /* add to session's stream list */
   strm->next = sess->strm_list_head.next;
@@ -425,7 +438,8 @@ static int h2_on_request_recv(h2_sess *sess, h2_strm *strm) {
   }
 
   if (rs > 0) {
-    if (h2_send_response_simple(sess, strm, strm->rmsg, rs, NULL, NULL, 0) != 0) {
+    if (h2_send_response_simple(sess, strm, strm->rmsg, rs,
+                                NULL, NULL, 0) != 0) {
       return NGHTTP2_ERR_CALLBACK_FAILURE;
     }
   }
@@ -764,11 +778,15 @@ static int ng_error2_cb(nghttp2_session *ng_sess, int lib_error_code,
  * Session Management -------------------------------------------------------
  */
 
-static const char *h2_close_reason_str(int close_reason/* CLOSE_BY_* */) {
-  return ((close_reason == CLOSE_BY_SOCK_EOF)? "socket closed" :
-          (close_reason == CLOSE_BY_SOCK_ERR)? "socket error" :
-          (close_reason == CLOSE_BY_SSL_ERR)?  "SSL error" :
-          (close_reason == CLOSE_BY_NGHTTP2_ERR)?  "nghttp2 error" :
+inline char *h2_sess_close_reason_str(h2_sess *sess) {
+  if (sess->close_reason == CLOSE_BY_NGHTTP2_END && sess->is_terminated) {
+     return "sess term";
+  }
+  return ((sess->close_reason == CLOSE_BY_SOCK_EOF)?    "socket closed" :
+          (sess->close_reason == CLOSE_BY_SOCK_ERR)?    "socket error" :
+          (sess->close_reason == CLOSE_BY_SSL_ERR)?     "SSL error" :
+          (sess->close_reason == CLOSE_BY_NGHTTP2_ERR)? "nghttp2 error" :
+          (sess->close_reason == CLOSE_BY_NGHTTP2_END)? "nghttp2 end" :
           "unknown");
 }
 
@@ -800,7 +818,7 @@ void h2_sess_free(h2_sess *sess) {
   fprintf(stderr, "%sDISCONNECTED%s%s: %.0f tps (%5f secs for %d streams)\n",
           sess->log_prefix,
           (sess->close_reason)? " by " : "",
-          (sess->close_reason)? h2_close_reason_str(sess->close_reason) : "",
+          (sess->close_reason)? h2_sess_close_reason_str(sess) : "",
           sess->stream_close_cnt / elapsed,
           elapsed, sess->stream_close_cnt);
 
@@ -828,8 +846,11 @@ void h2_sess_free(h2_sess *sess) {
 #endif
 
   if (sess->fd >= 0) {
+#ifdef EPOLL_MODE
+    epoll_ctl(sess->ctx->epoll_fd, EPOLL_CTL_DEL, sess->fd, NULL);
+#endif
     /* NOTE: close() SHOULD be called event when shutdown() is called */
-    /* shutdown(sess->fd, SHUT_RDWR); */ /* do  not call shutdown() */
+    shutdown(sess->fd, SHUT_RDWR);
     close(sess->fd);
     sess->fd = -1;
   }

@@ -6,7 +6,7 @@ LIBH2SIM=h2sim/libh2sim.a
 
 CC=gcc
 RM=rm
-CPPFLAGS=-DTLS_MODE=1 -D_REENTRANT -D_GNU_SOURCE \
+CPPFLAGS=-DTLS_MODE -D_REENTRANT -D_GNU_SOURCE \
           -I$(NGHTTP2_INCDIR) -I/usr/local/include
 CFLAGS=-g -W -Wall -Werror
 LDFLAGS= -L./h2sim -L$(NGHTTP2_LIBDIR) -L/usr/local/lib \
