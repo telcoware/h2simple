@@ -17,7 +17,7 @@ And goes with client and server simulator example code.
 ## Files
 
 repository:
-- https://github.com/setup74/h2simple
+- [https://github.com/setup74/h2simple](https://github.com/setup74/h2simple)
 
 h2sim library example application:
 - h2cli.c h2svr.c: h2sim app example code for client and server simulator
