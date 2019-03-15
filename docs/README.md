@@ -2,6 +2,7 @@
 For 3GPP R15 5G SBI HTTP/2 NF Simulator in C using nghttp2.
 By Lee Yongjae, Telcoware,Inc., setup74@telcoware.com,
 Version: 0.2.1 at 2019-03-13.
+See: [https://github.com/setup74/h2simple](https://github.com/setup74/h2simple)
 
 
 ## Introduction
@@ -14,10 +15,8 @@ So new HTTP2 stack layer for standalone C is built, named http2simple.
 And goes with client and server simulator example code.
 
 
-## Files
 
-repository:
-- [https://github.com/setup74/h2simple](https://github.com/setup74/h2simple)
+## Files
 
 h2sim library example application:
 - h2cli.c h2svr.c: h2sim app example code for client and server simulator
@@ -31,6 +30,16 @@ h2sim library files:
 tls utilities:
 - genkey_ex.sh: generates eckey.pem, eccert.pem
 - genkey_rsa.sh: generates rsakey.pem, rsacert.pem
+
+
+## Build
+
+need nghttp2 installed:
+- env variable NGHTTP2_INCDIR and NGHTTP2_LIBDIR should be set
+  if nghttp2 is not installed in /usr/local/
+
+just run make:
+- hsim/libh2sim.a, h2svr, h2cli is generated
 
 
 ## Abbrevations
@@ -53,7 +62,7 @@ tls utilities:
 
 server with response cases:
 ```
-./h2svr_r -S http://0.0.0.0:8080 -S https://0.0.0.0:8081 \
+./h2svr -S http://0.0.0.0:8080 -S https://0.0.0.0:8081 \
   -m POST   -p /user/ -s 200 \
             -x content-type=application/json -t '{ "RESULT" : "SUCCESS" }' \
   -m GET    -p /user/ -s 200 \
@@ -64,7 +73,7 @@ server with response cases:
 
 server with reponse cases and push promise:
 ```
-./h2svr_r -S http://0.0.0.0:8080 -S https://0.0.0.0:8081 \
+./h2svr -S http://0.0.0.0:8080 -S https://0.0.0.0:8081 \
   -m POST -p /user1k/ -s 200 -x content-type=application/json -e 1k \
      -o /user1k/name1 -s 200 -x content-type=application/json -t '1k_name1' \
      -o /user1k/name2 -s 200 -x content-type=application/json -t '1k_name2' \
@@ -81,25 +90,25 @@ server with reponse cases and push promise:
 
 client single uri GET case (default method is 'GET'):
 ```
-./h2cli_r http://127.0.0.1:8080/user1k/nobody:
+./h2cli http://127.0.0.1:8080/user1k/nobody:
 ```
 
 client single uri request with method and user header:
 ```
-./h2cli_r -m POST -u http://127.0.0.1:8080/test.txt \
+./h2cli -m POST -u http://127.0.0.1:8080/test.txt \
     -x content-type=application/json -f your_request_body_file
 ```
 
 client single uri request with request symbol replacement on uri, hdr, body:
 ```
-./h2cli_r -R __MDN__=01092%06d \
+./h2cli -R __MDN__=01092%06d \
   -m POST -u http://127.0.0.1:8080/user/__MDN__  \
           -x content-type=application/json -t '{ "USER_MDN" : "__MDN__" }'
 ```
 
 client multiple request senario:
 ```
-./h2cli_r -R __MDN__=01092%06d -s http -a 127.0.0.1:8080 \
+./h2cli -R __MDN__=01092%06d -s http -a 127.0.0.1:8080 \
   -m POST   -p /user/__MDN__  \
             -x content-type=application/json -t '{ "USER_MDN" : "__MDN__" }'  \
   -m GET    -p /user/__MDN__  \
@@ -111,14 +120,14 @@ client loop case:
 >   -C req_max for request loop count
 >   -q suppress output for performance check
 ```
-./h2cli_r -P 100 -C 100000 -m GET -u http://127.0.0.1:8080/user1k/nobody
+./h2cli -P 100 -C 100000 -m GET -u http://127.0.0.1:8080/user1k/nobody
 ```
 
 # h2cli and h2svr Performance Tests
 
 server for 1k/4k/10k performance test:
 ```
-./h2svr_r -S http://0.0.0.0:8080 -S https://0.0.0.0:8081 \
+./h2svr -S http://0.0.0.0:8080 -S https://0.0.0.0:8081 \
   -m POST -p /user1k/ -s 200 -x content-type=application/json -e 1k \
   -m POST -p /user4k/ -s 200 -x content-type=application/json -e 4k \
   -m POST -p /user10k/ -s 200 -x content-type=application/json -e 10k \
@@ -127,13 +136,13 @@ server for 1k/4k/10k performance test:
 
 client for tcp 1k/4k/10k  performance test:
 ```
-./h2cli_r -P 100 -C 100000 -R __MDN__=01092%06d      \
+./h2cli -P 100 -C 100000 -R __MDN__=01092%06d      \
   -m POST -u http://127.0.0.1:8080/user1k/__MDN__    \
           -x content-type=application/json -e 1k -q; \
-./h2cli_r -P 100 -C 100000 -R __MDN__=01092%06d      \
+./h2cli -P 100 -C 100000 -R __MDN__=01092%06d      \
   -m POST -u http://127.0.0.1:8080/user4k/__MDN__    \
           -x content-type=application/json -e 4k -q; \
-./h2cli_r -P 100 -C 100000 -R __MDN__=01092%06d      \
+./h2cli -P 100 -C 100000 -R __MDN__=01092%06d      \
   -m POST -u http://127.0.0.1:8080/user10k/__MDN__   \
           -x content-type=application/json -e 10k -q
 ```
@@ -141,13 +150,13 @@ client for tcp 1k/4k/10k  performance test:
 
 client for tls 1k/4k/10k  performance test:
 ```
-./h2cli_r -P 100 -C 100000 -R __MDN__=01092%06d      \
+./h2cli -P 100 -C 100000 -R __MDN__=01092%06d      \
   -m POST -u https://127.0.0.1:8081/user1k/__MDN__   \
           -x content-type=application/json -e 1k -q; \
-./h2cli_r -P 100 -C 100000 -R __MDN__=01092%06d      \
+./h2cli -P 100 -C 100000 -R __MDN__=01092%06d      \
   -m POST -u https://127.0.0.1:8081/user4k/__MDN__   \
           -x content-type=application/json -e 4k -q; \
-./h2cli_r -P 100 -C 100000 -R __MDN__=01092%06d      \
+./h2cli -P 100 -C 100000 -R __MDN__=01092%06d      \
   -m POST -u https://127.0.0.1:8081/user10k/__MDN__  \
           -x content-type=application/json -e 10k -q
 ```
