@@ -38,8 +38,8 @@ need nghttp2 installed:
 - env variable NGHTTP2_INCDIR and NGHTTP2_LIBDIR should be set
   if nghttp2 is not installed in /usr/local/
 
-just run make:
-- hsim/libh2sim.a, h2svr, h2cli is generated
+run make:
+- h2sim/libh2sim.a, h2svr and h2cli are built
 
 
 ## Abbrevations
