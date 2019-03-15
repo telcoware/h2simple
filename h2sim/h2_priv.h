@@ -76,8 +76,11 @@ extern h2_cls h2_cls_ctx;
 
 
 /*
- * Simple string buffer utility --------------------------------------------
+ * Simple string buffer utility for H2 Message Headers ---------------------
+ * allocates string on sbuf.xbuf and returns sbuf index of none zero
  */
+
+typedef unsigned short h2_sbuf_idx;  /* 0 for none */
 
 typedef struct h2_xbuf {
   struct h2_xbuf *next;
@@ -96,8 +99,11 @@ typedef struct h2_sbuf {
 /*void h2_sbuf_init(h2_sbuf *sbuf, int buf_size, int ext_step_size); */
 /*void h2_sbuf_clean(h2_sbuf *sbuf); */  /* frees used data and clean to init */
 
-char *h2_sbuf_put(h2_sbuf *sbuf, const char *str);
-char *h2_sbuf_put_n(h2_sbuf *sbuf, const char *str, int str_len);
+/* get string pointer from sbuf_idx */
+/* const char *h2_sbuf_get(h2_sbuf *sbuf, h2_sbuf_idx sbuf_idx); */
+
+h2_sbuf_idx h2_sbuf_put(h2_sbuf *sbuf, const char *str);
+h2_sbuf_idx h2_sbuf_put_n(h2_sbuf *sbuf, const char *str, int str_len);
   /* return pointer to copyed string onto sbuf buf[] */
   /* NOTE: str might be any binary stream */
   /* ASSUME:: sbuf has enough free space; to be checked wit sbuf_avail() */
@@ -108,7 +114,7 @@ char *h2_sbuf_put_n(h2_sbuf *sbuf, const char *str, int str_len);
  */
 
 #define H2_MSG_HDR_MAX        32  /* TODO: TO BE UNLIMITED */
-#define H2_MSG_SBUF_SIZE      (4 * 1024 - 596/*h2_msg*/)
+#define H2_MSG_SBUF_SIZE      (4 * 1024 - 188/*h2_msg*/)
 #define H2_MSG_SBUF_EXT_STEP  (4 * 1024 - 16/*h2_xbuf*/)
 
 
@@ -120,16 +126,16 @@ char *h2_sbuf_put_n(h2_sbuf *sbuf, const char *str, int str_len);
 const char *h2_msg_type_str(int msg_type);
 
 typedef struct h2_hdr {
-  char *name;
-  char *value;
+  h2_sbuf_idx name;
+  h2_sbuf_idx value;
 } h2_hdr;
 
 typedef struct h2_msg {
   /* request pseudo header; pointer on sbuf */
-  char *method;
-  char *scheme;
-  char *authority;  /* might be null */
-  char *path;
+  h2_sbuf_idx method;
+  h2_sbuf_idx scheme;
+  h2_sbuf_idx authority;  /* might be null */
+  h2_sbuf_idx path;
   // HERE: TODO: candadite for special fields
   // int path_len;
   // int path_arg_off;    /* path after '?' */

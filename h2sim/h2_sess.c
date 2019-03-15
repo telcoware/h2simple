@@ -204,6 +204,21 @@ static ssize_t ng_send_msg_body_cb(nghttp2_session *ng_sess,
   return n;
 }
 
+inline void h2_set_read_data_prd(nghttp2_data_provider *data_prd, 
+                                 h2_strm *strm, void *data, int size) {
+  /* ASSUME: data!=null, size>9 */
+  h2_read_buf *read_buf = &strm->send_body_rb;
+  read_buf->data = malloc(size + 1);
+  memcpy(read_buf->data, data, size);
+  read_buf->data[size] = '\0';
+  read_buf->data_size = size;
+  read_buf->data_used = 0;
+  read_buf->to_be_freed = 1;
+  read_buf->send_msg_type = strm->send_msg_type;
+  data_prd->source.ptr = read_buf;
+  data_prd->read_callback = ng_send_msg_body_cb;
+}
+
 /* Send HTTP request to the remote peer */
 int h2_send_request(h2_sess *sess, h2_msg *req,
                     h2_strm_free_cb strm_free_cb, void *strm_user_data) {
@@ -214,10 +229,11 @@ int h2_send_request(h2_sess *sess, h2_msg *req,
   int stream_id, i;
   char s[1][32];
 
-  ng_hdr_append(ng_hdr, &ng_hdr_num, REQ_HDR_MAX, ":method", req->method);
-  ng_hdr_append(ng_hdr, &ng_hdr_num, REQ_HDR_MAX, ":scheme", req->scheme);
-  ng_hdr_append(ng_hdr, &ng_hdr_num, REQ_HDR_MAX, ":authority", req->authority);
-  ng_hdr_append(ng_hdr, &ng_hdr_num, REQ_HDR_MAX, ":path", req->path);
+  ng_hdr_append(ng_hdr, &ng_hdr_num, REQ_HDR_MAX, ":method", h2_method(req));
+  ng_hdr_append(ng_hdr, &ng_hdr_num, REQ_HDR_MAX, ":scheme", h2_scheme(req));
+  ng_hdr_append(ng_hdr, &ng_hdr_num, REQ_HDR_MAX, ":authority",
+                                                             h2_authority(req));
+  ng_hdr_append(ng_hdr, &ng_hdr_num, REQ_HDR_MAX, ":path", h2_path(req));
   /* TODO: content-length MUST NOT be sent if  transfer-encoding is set. */
   /*       (rfc7230 3.3.2. Content-Length) */
   if (req->body && req->body_len > 0) {
@@ -226,7 +242,7 @@ int h2_send_request(h2_sess *sess, h2_msg *req,
   }
   for (i = 0; i < req->hdr_num; i++) {
     ng_hdr_append(ng_hdr, &ng_hdr_num, REQ_HDR_MAX,
-               req->hdr[i].name, req->hdr[i].value);
+                  h2_hdr_idx_name(req, i), h2_hdr_idx_value(req, i));
   }
 
   h2_strm *strm = h2_strm_init(sess, 0, H2_RESPONSE,
@@ -235,20 +251,10 @@ int h2_send_request(h2_sess *sess, h2_msg *req,
     /* TODO: handled error case */
 
   /* set send message body read handler */
-  nghttp2_data_provider _data_prd, *data_prd = NULL;
+  nghttp2_data_provider data_prd_buf, *data_prd = NULL;
   if (req->body && req->body_len > 0) {
-    h2_read_buf *rb = &strm->send_body_rb;
-    /* NOTE: h2_msg's body is always dynamic alloced */
-    rb->data = malloc(req->body_len + 1);
-    memcpy(rb->data, req->body, req->body_len);
-    rb->data[req->body_len] = '\0';
-    rb->data_size = req->body_len;
-    rb->data_used = 0;
-    rb->to_be_freed = 1;
-    rb->send_msg_type = strm->send_msg_type;
-    data_prd = &_data_prd;
-    data_prd->source.ptr = rb;
-    data_prd->read_callback = ng_send_msg_body_cb;
+    h2_set_read_data_prd(&data_prd_buf, strm, req->body, req->body_len);
+    data_prd = &data_prd_buf;
   }
 
   stream_id = nghttp2_submit_request(sess->ng_sess, NULL,
@@ -285,26 +291,14 @@ int h2_send_response(h2_sess *sess, h2_strm *strm, h2_msg *rsp) {
   }
   for (i = 0; i < rsp->hdr_num; i++) {
     ng_hdr_append(ng_hdr, &ng_hdr_num, RSP_HDR_MAX,
-               rsp->hdr[i].name, rsp->hdr[i].value);
+                  h2_hdr_idx_name(rsp, i), h2_hdr_idx_value(rsp, i));
   }
 
   /* set response body read handler */
-  nghttp2_data_provider _data_prd, *data_prd = NULL;
+  nghttp2_data_provider data_prd_buf, *data_prd = NULL;
   if (rsp->body && rsp->body_len > 0) {
-    /* always do copy body */
-    h2_read_buf *rb = &strm->send_body_rb;
-    rb->data = malloc(rsp->body_len + 1);
-    if (rsp->body_len > 0) {
-      memcpy(rb->data, rsp->body, rsp->body_len);
-    }
-    rb->data[rsp->body_len] = '\0';
-    rb->data_size = rsp->body_len;
-    rb->data_used = 0;
-    rb->to_be_freed = 1;
-    rb->send_msg_type = strm->send_msg_type;
-    data_prd = &_data_prd;
-    data_prd->source.ptr = rb;
-    data_prd->read_callback = ng_send_msg_body_cb;
+    h2_set_read_data_prd(&data_prd_buf, strm, rsp->body, rsp->body_len);
+    data_prd = &data_prd_buf;
   }
 
   /* mark response sent to prevent further push_promise */
@@ -370,13 +364,13 @@ int h2_send_push_promise(h2_sess *sess, h2_strm *request_strm,
 
   /* send PUSH_PROMISE with request headers */
 
-  ng_hdr_append(ng_hdr, &ng_hdr_num, PRM_HDR_MAX, ":method", prm_req->method);
-  ng_hdr_append(ng_hdr, &ng_hdr_num, PRM_HDR_MAX, ":scheme", prm_req->scheme);
-  ng_hdr_append(ng_hdr, &ng_hdr_num, PRM_HDR_MAX, ":authority", prm_req->authority);
-  ng_hdr_append(ng_hdr, &ng_hdr_num, PRM_HDR_MAX, ":path", prm_req->path);
+  ng_hdr_append(ng_hdr, &ng_hdr_num, PRM_HDR_MAX, ":method", h2_method(prm_req));
+  ng_hdr_append(ng_hdr, &ng_hdr_num, PRM_HDR_MAX, ":scheme", h2_scheme(prm_req));
+  ng_hdr_append(ng_hdr, &ng_hdr_num, PRM_HDR_MAX, ":authority", h2_authority(prm_req));
+  ng_hdr_append(ng_hdr, &ng_hdr_num, PRM_HDR_MAX, ":path", h2_path(prm_req));
   for (i = 0; i < prm_req->hdr_num; i++) {
     ng_hdr_append(ng_hdr, &ng_hdr_num, PRM_HDR_MAX,
-               prm_req->hdr[i].name, prm_req->hdr[i].value);
+                  h2_hdr_idx_name(prm_req, i), h2_hdr_idx_value(prm_req, i));
   }
   /* ASSUME: prm_req has no body */
 
@@ -414,9 +408,7 @@ int h2_send_push_promise(h2_sess *sess, h2_strm *request_strm,
 
 static int h2_on_request_recv(h2_sess *sess, h2_strm *strm) {
   /* check request headers */
-  if (!strm->rmsg->method ||
-      !strm->rmsg->authority ||
-      !strm->rmsg->path) {
+  if (!strm->rmsg->method || !strm->rmsg->authority || !strm->rmsg->path) {
     warnx("%s[%d] request psuedo header missing; send 400 response",
           sess->log_prefix, strm->stream_id);
     if (h2_send_response_simple(sess, strm, strm->rmsg, 400,

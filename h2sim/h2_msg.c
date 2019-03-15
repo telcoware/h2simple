@@ -67,7 +67,7 @@ inline void h2_sbuf_init(h2_sbuf *sbuf, int buf_size, int ext_step_size) {
   sbuf->ext_step_size = ext_step_size;
   sbuf->xbuf.next = NULL;
   sbuf->xbuf.size = buf_size;
-  sbuf->xbuf.free = buf_size;
+  sbuf->xbuf.free = buf_size - 1;  /* to skip h2_sbuf_idx 0 */
 }
 
 inline void h2_sbuf_clean(h2_sbuf *sbuf) {
@@ -78,31 +78,45 @@ inline void h2_sbuf_clean(h2_sbuf *sbuf) {
       xbuf->next = NULL;
       free(xbuf);
     }
-    sbuf->xbuf.free = sbuf->xbuf.size;
+    sbuf->xbuf.free = sbuf->xbuf.size - 1;  /* to skip h2_sbuf_idx 0 */
   }
 }
 
-char *h2_sbuf_put_n(h2_sbuf *sbuf, const char *data, int size) {
-  /* allocate data allowing asciiz string by appending null char */
-  if (data == NULL) {
-    return NULL; 
-  }
-
-  /* allocate buffer */
-  char *r;
-  if (sbuf->xbuf.free >= size + 1) {
-    /* fit in self xbuf */
-    r = &sbuf->xbuf.buf[sbuf->xbuf.size - sbuf->xbuf.free];
-    sbuf->xbuf.free -= size + 1;
-  } else {
-    /* scan for available buffer at xbuf->next */
-    h2_xbuf *xbuf = &sbuf->xbuf;
-    while (xbuf->next && xbuf->next->free < size + 1) {
-      xbuf = xbuf->next;
+inline const char *h2_sbuf_get(h2_sbuf *sbuf, h2_sbuf_idx sbuf_idx) {
+  if (sbuf_idx == 0) {
+    return NULL;
+  } 
+  h2_xbuf *xbuf;
+  for (xbuf = &sbuf->xbuf; xbuf; xbuf = xbuf->next) {
+    if (sbuf_idx < xbuf->size) {
+      return &xbuf->buf[sbuf_idx];
     }
+    sbuf_idx -= xbuf->size;
+  }
+  return NULL;  /* invalid sbuf_idx */
+}
+
+h2_sbuf_idx h2_sbuf_put_n(h2_sbuf *sbuf, const char *data, int size) {
+  if (sbuf == NULL || data == NULL) {
+    return 0;
+  }
+  h2_sbuf_idx sbuf_idx = 0;
+  h2_xbuf *xbuf;
+  for (xbuf = &sbuf->xbuf; xbuf; xbuf = xbuf->next) {
+    if (size < xbuf->free) {
+      char *buf = &xbuf->buf[xbuf->size - xbuf->free];
+      sbuf_idx += xbuf->size - xbuf->free;
+      xbuf->free -= size + 1/* zero padding for asciiz string */;
+      /* copy data */
+      if (size > 0) {
+        memcpy(buf, data, size);
+      }
+      buf[size] = '\0';
+      return sbuf_idx;
+    }
+    sbuf_idx += xbuf->size;
     if (xbuf->next == NULL) {
-      /* append new xbuf */
-      /* TODO: may need to redefine ext_step_size for malloc fragmentation */ 
+      /* append new xbuf; allocate power of 2 of ext_step_size over size */
       int ext_size = sbuf->ext_step_size;
       while (ext_size < size + 1) {
         ext_size *= 2;
@@ -110,27 +124,17 @@ char *h2_sbuf_put_n(h2_sbuf *sbuf, const char *data, int size) {
       xbuf->next = malloc(sizeof(h2_xbuf) + ext_size);
       if (xbuf->next == NULL) {
         warnx("cannot allocate xbuf for msg.sbuf: ext_size=%d", ext_size);
-        return NULL;
+        return 0;
       }
       xbuf->next->next = NULL;
       xbuf->next->size = ext_size;
       xbuf->next->free = ext_size;
     }
-    xbuf = xbuf->next;
-    /* now, xbuf has the buf[] to use */
-    r = &xbuf->buf[xbuf->size - xbuf->free];
-    xbuf->free -= size + 1;
   }
-
-  /* copy data */
-  if (size > 0) {
-    memcpy(r, data, size);
-  }
-  r[size] = '\0';  /* make null terminated */ 
-  return r;
+  return 0;  /* cannot reach here */
 }
 
-char *h2_sbuf_put(h2_sbuf *sbuf, const char *str) {
+h2_sbuf_idx h2_sbuf_put(h2_sbuf *sbuf, const char *str) {
   return h2_sbuf_put_n(sbuf, str, (str)? strlen(str) : 0);
 }
 
@@ -160,6 +164,12 @@ h2_msg *h2_msg_init() {
   if (msg) {
     h2_sbuf_init(&msg->sbuf, sizeof(msg->sbuf_buf), H2_MSG_SBUF_EXT_STEP);
   }
+
+  fprintf(stderr, "HERE: DEBUG: sizeof(h2_msg)=%d H2_MSG_SBUF_SIZE=%d "
+          "sizeof(h2_xbuf)=%d H2_MSG_SBUF_EXT_STEP=%d\n",
+          (int)sizeof(h2_msg), H2_MSG_SBUF_SIZE,
+          (int)sizeof(h2_xbuf), H2_MSG_SBUF_EXT_STEP);
+
   return msg;
 }
 
@@ -182,15 +192,15 @@ void h2_msg_free(h2_msg *msg) {
 
 void h2_cpy_msg(h2_msg *dst, h2_msg *src) {
   if (dst && src) {
-    dst->method = h2_sbuf_put(&dst->sbuf, src->method);
-    dst->scheme = h2_sbuf_put(&dst->sbuf, src->scheme);
-    dst->authority = h2_sbuf_put(&dst->sbuf, src->authority);
-    dst->path = h2_sbuf_put(&dst->sbuf, src->path);
+    h2_set_method(dst, h2_method(src));
+    h2_set_scheme(dst, h2_scheme(src));
+    h2_set_authority(dst, h2_authority(src));
+    h2_set_path(dst, h2_path(src));
     dst->status = src->status;
 
     int i;
     for (i = 0; i < src->hdr_num; i++) { 
-      h2_add_hdr(dst, src->hdr[i].name, src->hdr[i].value);
+      h2_add_hdr(dst, h2_hdr_idx_name(src, i), h2_hdr_idx_value(src, i));
     }
  
     if (src->body && src->body_len) {
@@ -213,10 +223,10 @@ void h2_prepare_prm(h2_msg *prm, h2_msg *ref_req,
                     const char *method, const char *path) {
   if (prm && ref_req) {
     /* copy request pseudo headers */
-    prm->method = h2_sbuf_put(&prm->sbuf, method);
-    prm->scheme = h2_sbuf_put(&prm->sbuf, ref_req->scheme);
-    prm->authority = h2_sbuf_put(&prm->sbuf, ref_req->authority);
-    prm->path = h2_sbuf_put(&prm->sbuf, path);
+    h2_set_method(prm, method);
+    h2_set_scheme(prm, h2_scheme(ref_req));
+    h2_set_authority(prm, h2_authority(ref_req));
+    h2_set_path(prm, path);
   }
 }
 
@@ -226,39 +236,39 @@ void h2_prepare_prm(h2_msg *prm, h2_msg *ref_req,
  */
 
 const char *h2_method(h2_msg *req) {
-  return req->method;
+  return h2_sbuf_get(&req->sbuf, req->method);
 }
 
 const char *h2_scheme(h2_msg *req) {
-  return req->scheme;
+  return h2_sbuf_get(&req->sbuf, req->scheme);
 }
 
 const char *h2_authority(h2_msg *req) {
-  return req->authority;
+  return h2_sbuf_get(&req->sbuf, req->authority);
 }
 
 const char *h2_path(h2_msg *req) {
-  return req->path;
+  return h2_sbuf_get(&req->sbuf, req->path);
 }
 
 int h2_status(h2_msg *rsp) {
   return rsp->status;
 }
 
-void h2_set_method(h2_msg *req, const char *method) {
-  req->method = h2_sbuf_put(&req->sbuf, method);
+void h2_set_method(h2_msg *msg, const char *method) {
+  msg->method = h2_sbuf_put(&msg->sbuf, method);
 }
 
-void h2_set_scheme(h2_msg *req, const char *scheme) {
-  req->scheme = h2_sbuf_put(&req->sbuf, scheme);
+void h2_set_scheme(h2_msg *msg, const char *scheme) {
+  msg->scheme = h2_sbuf_put(&msg->sbuf, scheme);
 }
 
-void h2_set_authority(h2_msg *req, const char *authority) {
-  req->authority = h2_sbuf_put(&req->sbuf, authority);
+void h2_set_authority(h2_msg *msg, const char *authority) {
+  msg->authority = h2_sbuf_put(&msg->sbuf, authority);
 }
 
-void h2_set_path(h2_msg *req, const char *path) {
-  req->path = h2_sbuf_put(&req->sbuf, path);
+void h2_set_path(h2_msg *msg, const char *path) {
+  msg->path = h2_sbuf_put(&msg->sbuf, path);
 }
 
 void h2_set_status(h2_msg *rsp, int status) {
@@ -320,8 +330,8 @@ const char *h2_hdr_value(h2_msg *msg, const char *name) {
   if (msg) {
     h2_hdr *hdr = msg->hdr;
     for (n = msg->hdr_num; n >= 0; n--, hdr++) {
-      if (!strcmp(hdr->name, name)) {
-        return hdr->value;
+      if (!strcmp(h2_sbuf_get(&msg->sbuf, hdr->name), name)) {
+        return h2_sbuf_get(&msg->sbuf, hdr->value);
       }
     }
   }
@@ -368,7 +378,7 @@ int h2_set_hdr(h2_msg *msg, const char *name, const char *value) {
   int n, value_len = strlen(value);
   h2_hdr *hdr = msg->hdr;
   for (n = msg->hdr_num; n >= 0; n--, hdr++) {
-    if (!strcmp(hdr->name, name)) {
+    if (!strcmp(h2_sbuf_get(&msg->sbuf, hdr->name), name)) {
       if (value == NULL) {
         /* delete header */
         for (n--; n > 0; n--, hdr++) {
@@ -377,7 +387,7 @@ int h2_set_hdr(h2_msg *msg, const char *name, const char *value) {
         }
         memset(hdr, 0, sizeof(*hdr));
         return 2;
-      } else if (!strcmp(hdr->value, value)) {
+      } else if (!strcmp(h2_sbuf_get(&msg->sbuf, hdr->value), value)) {
         /* already has same value; no change */ 
         return 0;
       } else {
@@ -394,7 +404,7 @@ int h2_del_hdr(h2_msg *msg, const char *name) {
   int n;
   h2_hdr *hdr = msg->hdr;
   for (n = msg->hdr_num; n > 0; n--, hdr++) {
-    if (!strcmp(hdr->name, name)) {
+    if (!strcmp(h2_sbuf_get(&msg->sbuf, hdr->name), name)) {
       for (n--; n > 0; n--, hdr++) {
         *(hdr) = *(hdr + 1); /* NOTE: there is no dealloc in msg->sbuf */
       }
@@ -409,8 +419,8 @@ int h2_cpy_hdr(h2_msg *dst, h2_msg *src, const char *name) {
   int n;
   h2_hdr *hdr = src->hdr;
   for (n = src->hdr_num; n > 0; n--, hdr++) {
-    if (!strcmp(hdr->name, name)) {
-      return h2_add_hdr(dst, name, hdr->value);
+    if (!strcmp(h2_sbuf_get(&src->sbuf, hdr->name), name)) {
+      return h2_add_hdr(dst, name, h2_sbuf_get(&src->sbuf, hdr->value));
     }
   }
   return 0; /* not found */
@@ -423,14 +433,14 @@ int h2_hdr_num(h2_msg *msg) {
 
 const char *h2_hdr_idx_name(h2_msg *msg, int hdr_idx) {
   if (hdr_idx >= 0 && hdr_idx < msg->hdr_num) {
-    return msg->hdr[hdr_idx].name;
+    return h2_sbuf_get(&msg->sbuf, msg->hdr[hdr_idx].name);
   }
   return NULL;
 }
 
 const char *h2_hdr_idx_value(h2_msg *msg, int hdr_idx) {
   if (hdr_idx >= 0 && hdr_idx < msg->hdr_num) {
-    return msg->hdr[hdr_idx].value;
+    return h2_sbuf_get(&msg->sbuf, msg->hdr[hdr_idx].value);
   }
   return NULL;
 }
@@ -600,23 +610,23 @@ void h2_dump_msg(FILE *fp, h2_msg *msg, const char *line_prefix,
   if (msg->status) {
     fprintf(fp, "%s  %-14s = %d\n", line_prefix, ":status", msg->status);
   } else {
-    fprintf(fp, "%s  %-14s = %s\n", line_prefix, ":method", msg->method);
-    fprintf(fp, "%s  %-14s = %s\n", line_prefix, ":scheme", msg->scheme);
-    fprintf(fp, "%s  %-14s = %s\n", line_prefix, ":authority", msg->authority);
-    fprintf(fp, "%s  %-14s = %s\n", line_prefix, ":path", msg->path);
+    fprintf(fp, "%s  %-14s = %s\n", line_prefix, ":method", h2_method(msg));
+    fprintf(fp, "%s  %-14s = %s\n", line_prefix, ":scheme", h2_scheme(msg));
+    fprintf(fp, "%s  %-14s = %s\n", line_prefix, ":authority", h2_authority(msg));
+    fprintf(fp, "%s  %-14s = %s\n", line_prefix, ":path", h2_path(msg));
   }
 
   /* print headers */
-  int n = msg->hdr_num;
-  h2_hdr *hdr;
-  for (hdr = msg->hdr; n > 0; n--, hdr++) {
-    fprintf(fp, "%s  %-14s = %s\n", line_prefix, hdr->name, hdr->value);
+  int i, n = h2_hdr_num(msg);
+  for (i = 0; i < n; i++) {
+    fprintf(fp, "%s  %-14s = %s\n", line_prefix,
+            h2_hdr_idx_name(msg, i), h2_hdr_idx_value(msg, i));
   }
 
   /* print body */
   if (msg->body && msg->body_len > 0) {
     fprintf(fp, "%s  __body__[%d]:\n", line_prefix, msg->body_len);
-    fprintf(fp, "%s  %s\n", line_prefix, msg->body);
+    fprintf(fp, "%s  %s\n", line_prefix, (char *)msg->body);
   }
 }
 
