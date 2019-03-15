@@ -265,7 +265,7 @@ static h2_msg *gen_request(h2_msg *src, client_job_t *job,
  */
 
 static int start_request(client_job_t *job) {
-  int i;
+  int i, r;
 
   job->req_cnt = 0;
   job->rsp_num = 0;
@@ -286,8 +286,11 @@ static int start_request(client_job_t *job) {
                   req_task->req_id, req_task->req_step, req_task->par_idx);
     }
 
-    h2_send_request(job->req_step_sess[0], req, NULL, req_task);
+    r = h2_send_request(job->req_step_sess[0], req, NULL, req_task);
     h2_msg_free(req);
+    if (r < 0) {
+      break;
+    }
   }
   return 0;
 }
@@ -637,6 +640,9 @@ int main(int argc, char **argv) {
                                response_cb, push_promise_cb, push_response_cb,
                                NULL/*static user data*/, &job);
       job.req_step_sess[i] = cli_sess[j].sess;
+      if (cli_sess[j].sess == NULL) {
+        return EXIT_FAILURE;
+      }
       cli_sess_num++;
     }
   }

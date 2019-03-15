@@ -577,7 +577,11 @@ static h2_sess *h2_sess_client_start(int sock, h2_ctx *ctx,
 
   h2_set_nonblock(sock);
 
-  fprintf(stderr, "%sCONNECTED\n", sess->log_prefix);
+  if (client_ssl_ctx) {
+    fprintf(stderr, "%sCONNECTED TLS TO %s\n", sess->log_prefix, authority);
+  } else {
+    fprintf(stderr, "%sCONNECTED TCP TO %s\n", sess->log_prefix, authority);
+  }
   return sess;
 }
 
@@ -639,7 +643,7 @@ h2_sess *h2_connect(h2_ctx *ctx, const char *authority, SSL_CTX *cli_ssl_ctx,
   }
   freeaddrinfo(res);
   if (sess == NULL) {
-    warnx("%s cannot connect\n", authority);
+    warnx("cannot connect to %s", authority);
     return NULL;
   }
 
@@ -696,7 +700,7 @@ static int h2_sess_server_tls_start(h2_sess *sess)
 
   SSL_get0_alpn_selected(ssl, &alpn, &alpnlen);
   if (alpn == NULL || alpnlen != 2 || memcmp("h2", alpn, 2) != 0) {
-    warnx("%stls alpn h2 is not negotiated: alpn=%p alpnlen=%d\n",
+    warnx("%stls alpn h2 is not negotiated: alpn=%p alpnlen=%d",
           sess->log_prefix, alpn, alpnlen);
     return -1;
   }
@@ -953,7 +957,7 @@ h2_ctx *h2_ctx_init(int verbose) {
 #ifdef EPOLL_MODE
   ctx->epoll_fd = epoll_create(1/* not used; just non zero */);
   if (ctx->epoll_fd < 0) {
-    warnx("init failed for epoll create error: %s\n", strerror(errno));
+    warnx("init failed for epoll create error: %s", strerror(errno));
     free(ctx);
     return NULL;
   }
@@ -1007,28 +1011,28 @@ void h2_ctx_stop(h2_ctx *ctx) {
 void h2_ctx_run(h2_ctx *ctx) {
   ctx->service_flag = 1;
 
-  int epe_max, epe_alloced = 1024;
-  struct epoll_event *epe;  /* dynamic allcoed epoll_event[epe_alloced] */
-  epe = malloc(sizeof(*epe) * epe_alloced); 
+  int ea_max, ea_alloced = 1024;
+  struct epoll_event *ea;  /* dynamic allcoed epoll_event[epe_alloced] */
+  ea = malloc(sizeof(*ea) * ea_alloced); 
 
   while (ctx->service_flag) {
     /* prepare poll fd array */
-    epe_max = ctx->sess_num + ctx->svr_num;
-    if (epe_alloced < epe_max) {
-      epe_alloced = ((epe_max + 16 + 1023) / 1024) * 1024;
-      epe = realloc(epe, sizeof(*epe) * epe_alloced); 
-      if (epe == NULL) {
+    ea_max = ctx->sess_num + ctx->svr_num;
+    if (ea_alloced < ea_max) {
+      ea_alloced = ((ea_max + 16 + 1023) / 1024) * 1024;
+      ea = realloc(ea, sizeof(*ea) * ea_alloced); 
+      if (ea == NULL) {
         warnx("epoll event buffer realloc failed; quit run loop: size=%d",
-              (int)(sizeof(*epe) * epe_alloced));
+              (int)(sizeof(*ea) * ea_alloced));
         break;
       }
     }
-    if (epe_max <= 0) {
+    if (ea_max <= 0) {
       break;  /* no more session to service */
     }
 
     /* wait for epoll event */
-    int r = epoll_wait(ctx->epoll_fd, epe, epe_max, 100);
+    int r = epoll_wait(ctx->epoll_fd, ea, ea_max, 100);
     if (r == 0 || (r < 0 && errno == EINTR)) {
       continue;
     } else if (r < 0) {
@@ -1037,7 +1041,7 @@ void h2_ctx_run(h2_ctx *ctx) {
     }
 
     /* check for h2 sess/srv socket */
-    struct epoll_event *e = epe;
+    struct epoll_event *e = ea;
     for ( ; r > 0; r--, e++) {
       int events = e->events;
       if (((h2_obj *)e->data.ptr)->cls == &h2_cls_svr) {
@@ -1070,13 +1074,13 @@ void h2_ctx_run(h2_ctx *ctx) {
           }
         }
         if ((events & EPOLLRDHUP)) {
-          warnx("socket closed by peer\n");
+          warnx("socket closed by peer");
           sess->close_reason = CLOSE_BY_SOCK_EOF;
           h2_sess_free(sess);
           continue;
         }
         if ((events & (EPOLLERR | EPOLLHUP))) {
-          warnx("socket errored: epoll_events=0x%02x\n", events);
+          warnx("socket errored: epoll_events=0x%02x", events);
           sess->close_reason = CLOSE_BY_SOCK_ERR;
           h2_sess_free(sess);
           continue;
@@ -1085,7 +1089,7 @@ void h2_ctx_run(h2_ctx *ctx) {
     }
   }
 
-  free(epe);
+  free(ea);
 }
 
 #else /* EPOLL_MODE */
@@ -1187,13 +1191,13 @@ void h2_ctx_run(h2_ctx *ctx) {
           }
         }
         if ((revents & POLLRDHUP)) {
-          warnx("socket closed by peer\n");
+          warnx("socket closed by peer");
           sess->close_reason = CLOSE_BY_SOCK_EOF;
           h2_sess_free(sess);
           continue;
         }
         if ((revents & (POLLERR | POLLHUP | POLLNVAL))) {
-          warnx("socket errored: revents=0x%02x\n", revents);
+          warnx("socket errored: revents=0x%02x", revents);
           sess->close_reason = CLOSE_BY_SOCK_ERR;
           h2_sess_free(sess);
           continue;

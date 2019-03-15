@@ -62,7 +62,7 @@ static int ng_hdr_append(nghttp2_nv *hdr_tbl, int *hdr_num, int hdr_max,
                       const char *name, const char *value)
 {
   if (*hdr_num >= hdr_max) {
-    warnx("hdr_tbl is full: hdr_max=%d\n", hdr_max);
+    warnx("hdr_tbl is full: hdr_max=%d", hdr_max);
     return -1;
   }
 
@@ -256,7 +256,7 @@ int h2_send_request(h2_sess *sess, h2_msg *req,
   if (stream_id < 0) {
     warnx("%sCannot not submit HTTP request: %s",
           sess->log_prefix, nghttp2_strerror(stream_id));
-    return -1;
+    return -2;
   }
   strm->stream_id = stream_id;
 
@@ -432,7 +432,7 @@ static int h2_on_request_recv(h2_sess *sess, h2_strm *strm) {
   }
   if (rs < 0) {
     /* TODO: log and do response as 500 Internal Server Error */
-    warnx("%s[%d] request_cbreturns error; send 500 response: ret=%d\n",
+    warnx("%s[%d] request_cbreturns error; send 500 response: ret=%d",
           sess->log_prefix, strm->stream_id, rs);
     rs = 500;
   }
@@ -452,7 +452,7 @@ static int h2_on_response_recv(h2_sess *sess, h2_strm *strm) {
     int ret = sess->response_cb(sess, strm->rmsg,
                                 sess->user_data, strm->user_data);
     if (ret < 0) {
-      warnx("%s[%d] response_cb failed; go ahead: ret=%d\n",
+      warnx("%s[%d] response_cb failed; go ahead: ret=%d",
             sess->log_prefix, strm->stream_id, ret);
     }
   }
@@ -471,7 +471,7 @@ static int h2_on_push_promise_recv(h2_sess *sess, h2_strm *req_strm,
                                   sess->user_data, req_strm->user_data,
                                   &push_strm_free_cb, &push_strm_user_data);
     if (r < 0) {
-      warnx("%s[%d] push_promise_callback failed; reset: ret=%d\n",
+      warnx("%s[%d] push_promise_callback failed; reset: ret=%d",
             sess->log_prefix, req_strm->stream_id, r);
     } else {
       prm_strm->strm_free_cb = push_strm_free_cb;
@@ -493,7 +493,7 @@ static int h2_on_push_response_recv(h2_sess *sess, h2_strm *prm_strm) {
     int ret = sess->push_response_cb(sess, prm_strm->rmsg,
                                      sess->user_data, prm_strm->user_data);
     if (ret < 0) {
-      warnx("%s[%d] on_push_promise_callback failed; go ahead: ret=%d\n",
+      warnx("%s[%d] on_push_promise_callback failed; go ahead: ret=%d",
             sess->log_prefix, prm_strm->stream_id, ret);
     }
   }
@@ -822,6 +822,18 @@ void h2_sess_free(h2_sess *sess) {
           sess->stream_close_cnt / elapsed,
           elapsed, sess->stream_close_cnt);
 
+  if (sess->fd >= 0) {
+#ifdef EPOLL_MODE
+    epoll_ctl(sess->ctx->epoll_fd, EPOLL_CTL_DEL, sess->fd, NULL);
+#endif
+    /* NOTE: close() SHOULD be called event when shutdown() is called */
+    shutdown(sess->fd, SHUT_RDWR);
+    close(sess->fd);
+    sess->fd = -1;
+  }
+  nghttp2_session_del(sess->ng_sess);
+  sess->ng_sess = NULL;
+
   /* free streams */
   h2_strm *strm = sess->strm_list_head.next;
   while (strm) {
@@ -844,18 +856,6 @@ void h2_sess_free(h2_sess *sess) {
     sess->ssl = NULL;
   }
 #endif
-
-  if (sess->fd >= 0) {
-#ifdef EPOLL_MODE
-    epoll_ctl(sess->ctx->epoll_fd, EPOLL_CTL_DEL, sess->fd, NULL);
-#endif
-    /* NOTE: close() SHOULD be called event when shutdown() is called */
-    shutdown(sess->fd, SHUT_RDWR);
-    close(sess->fd);
-    sess->fd = -1;
-  }
-  nghttp2_session_del(sess->ng_sess);
-  sess->ng_sess = NULL;
 
   /* delete from ctx sess list */
   sess->prev->next = sess->next;
@@ -880,12 +880,12 @@ int h2_sess_terminate(h2_sess *sess) {
   int ret;
   if ((ret = nghttp2_session_terminate_session(sess->ng_sess,
                                                NGHTTP2_NO_ERROR)) < 0) {
-    warnx("%snghttp2_session_terminate_session() failed: ret=%d\n",
+    warnx("%snghttp2_session_terminate_session() failed: ret=%d",
           sess->log_prefix, ret);
     return -1;
   }
   if (sess->ctx->verbose) {
-    warnx("%sTERMINATE SESSION\n", sess->log_prefix);
+    warnx("%sTERMINATE SESSION", sess->log_prefix);
   }
   sess->is_terminated = 1;
   return 0;

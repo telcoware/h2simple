@@ -281,9 +281,9 @@ int h2_set_req_uri(h2_msg *msg, const char *uri) {
 #endif
   } else {
 #ifdef TLS_MODE
-    warnx("Invalid scheme in uri; should be 'http' or 'https': %s\n", uri);
+    warnx("Invalid scheme in uri; should be 'http' or 'https': %s", uri);
 #else
-    warnx("Invalid scheme in uri; should be 'http' only: %s\n", uri);
+    warnx("Invalid scheme in uri; should be 'http' only: %s", uri);
 #endif
     return -1;
   }
