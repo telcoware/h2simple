@@ -148,7 +148,11 @@ client for tcp 1k/4k/10k  performance test:
   -m POST -u http://127.0.0.1:8080/user10k/__MDN__   \
           -x content-type=application/json -e 10k -q
 ```
---> TCP 1K/4K/10K TPS = 120K/80K/55K at Xeon Gold 6132 CPU @ 2.60GHz
+TCP 1K/4K/10K TPS:
+- 120K/80K/55K LOCAL on A: Intel(R) Xeon(R) Gold 6132 CPU @ 2.60GHz
+- 80K/55K/33K LOCAL on B: Intel(R) Xeon(R) CPU E5-2690 0 @ 2.90GHz (HT=off)
+- 73K/18K/7K REMOTE A->B
+
 
 client for tls 1k/4k/10k  performance test:
 ```
@@ -162,6 +166,10 @@ client for tls 1k/4k/10k  performance test:
   -m POST -u https://127.0.0.1:8081/user10k/__MDN__  \
           -x content-type=application/json -e 10k -q
 ```
---> TLS 1K/4K/10K TPS = 55K/44K/33K at Xeon Gold 6132 CPU @ 2.60GHz
+TLS 1K/4K/10K TPS:
+- 55K/44K/33K LOCAL on A: Intel(R) Xeon(R) Gold 6132 CPU @ 2.60GHz
+- 35K/30K/22K LOCAL on B: Intel(R) Xeon(R) CPU E5-2690 0 @ 2.90GHz (HT=off)
+- 65K/19K/7K REMOTE A->B
+
 
 
