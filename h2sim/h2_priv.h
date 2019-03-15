@@ -114,8 +114,8 @@ h2_sbuf_idx h2_sbuf_put_n(h2_sbuf *sbuf, const char *str, int str_len);
  */
 
 #define H2_MSG_HDR_MAX        32  /* TODO: TO BE UNLIMITED */
-#define H2_MSG_SBUF_SIZE      (4 * 1024 - 188/*h2_msg*/)
-#define H2_MSG_SBUF_EXT_STEP  (4 * 1024 - 16/*h2_xbuf*/)
+#define H2_MSG_SBUF_SIZE      (1024 - 188/* h2_msg */)
+#define H2_MSG_SBUF_EXT_STEP  (1024 - 16/* h2_xbuf */)
 
 
 /* h2 msg type */
