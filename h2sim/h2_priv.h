@@ -114,8 +114,8 @@ h2_sbuf_idx h2_sbuf_put_n(h2_sbuf *sbuf, const char *str, int str_len);
  */
 
 #define H2_MSG_HDR_MAX        32  /* TODO: TO BE UNLIMITED */
-#define H2_MSG_SBUF_SIZE      (1024 - 188/* h2_msg */)
-#define H2_MSG_SBUF_EXT_STEP  (1024 - 16/* h2_xbuf */)
+#define H2_MSG_SBUF_SIZE      (1024 - 188/* offsetof(h2_msg,sbuf_buf) */)
+#define H2_MSG_SBUF_EXT_STEP  (1024 - (int)sizeof(h2_xbuf))
 
 
 /* h2 msg type */
@@ -134,13 +134,8 @@ typedef struct h2_msg {
   /* request pseudo header; pointer on sbuf */
   h2_sbuf_idx method;
   h2_sbuf_idx scheme;
-  h2_sbuf_idx authority;  /* might be null */
+  h2_sbuf_idx authority;
   h2_sbuf_idx path;
-  // HERE: TODO: candadite for special fields
-  // int path_len;
-  // int path_arg_off;    /* path after '?' */
-  // HERE: TODO: candadite for special fields
-  // int content_length;  /* value of content_length header */ 
   /* response pseudo header */
   int status;
 
