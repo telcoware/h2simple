@@ -41,6 +41,8 @@ need nghttp2 installed:
 run make:
 - h2sim/libh2sim.a, h2svr and h2cli are built
 
+run genkey_ec.sh:
+- eckey.pem and eccert.pem are generated to be used for tls mode default key and certificate file
 
 ## Abbrevations
 
