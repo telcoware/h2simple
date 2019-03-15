@@ -60,12 +60,6 @@ int verbose = 1;
 #define PUSH_PRM_MAX  100
 
 
-// HERE TODO: server app logic status and trigger for
-//       - req recv complete
-//       - rsp send complete (just ack)
-//       - req recv fail (no event on app)
-//       - rsp send fail for session error
-
 /* application context */
 
 typedef struct http2_rsp_case {

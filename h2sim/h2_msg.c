@@ -165,10 +165,12 @@ h2_msg *h2_msg_init() {
     h2_sbuf_init(&msg->sbuf, sizeof(msg->sbuf_buf), H2_MSG_SBUF_EXT_STEP);
   }
 
+  /*
   fprintf(stderr, "HERE: DEBUG: sizeof(h2_msg)=%d H2_MSG_SBUF_SIZE=%d "
           "sizeof(h2_xbuf)=%d H2_MSG_SBUF_EXT_STEP=%d\n",
           (int)sizeof(h2_msg), H2_MSG_SBUF_SIZE,
           (int)sizeof(h2_xbuf), H2_MSG_SBUF_EXT_STEP);
+  */
 
   return msg;
 }

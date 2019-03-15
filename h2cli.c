@@ -296,8 +296,7 @@ static int start_request(client_job_t *job) {
 }
 
 static int response_cb(h2_sess *sess, h2_msg *rsp, void *ctx_user_data,
-                       void *req_stream_user_data)
-{
+                       void *req_stream_user_data) {
   client_job_t *job = ctx_user_data;
   req_task_t *req_task = req_stream_user_data;
   (void)sess;
@@ -345,8 +344,7 @@ static void push_strm_free_cb(h2_strm *strm, void *user_data) {
 static int push_promise_cb(h2_sess *sess, h2_msg *prm_req,
                            void *sess_user_data, void *strm_user_data,
                            h2_strm_free_cb *push_strm_free_cb_ret,
-                           void **push_strm_user_data_ret)
-{
+                           void **push_strm_user_data_ret) {
   req_task_t *req_task = strm_user_data;
   (void)sess;
   (void)sess_user_data;
@@ -365,8 +363,7 @@ static int push_promise_cb(h2_sess *sess, h2_msg *prm_req,
 }
 
 static int push_response_cb(h2_sess *sess, h2_msg *prm_rsp,
-                            void *sess_user_data, void *push_stream_user_data)
-{
+                            void *sess_user_data, void *push_stream_user_data) {
   char *prm_req_path = push_stream_user_data;
   (void)sess;
   (void)sess_user_data;
@@ -413,8 +410,7 @@ static void help(char *prog) {
   fprintf(stderr, "NOTE: now, only the first req step's scheme and authority is used\n");
 }
 
-static int get_replace_symbol(char *symbol_format_str, client_job_t *job)
-{
+static int get_replace_symbol(char *symbol_format_str, client_job_t *job) {
   char *sym, *fmt;
   int sym_len, fmt_len;
 
