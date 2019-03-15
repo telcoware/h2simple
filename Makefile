@@ -8,7 +8,7 @@ CC=gcc
 RM=rm
 CPPFLAGS=-DTLS_MODE -D_REENTRANT -D_GNU_SOURCE \
           -I$(NGHTTP2_INCDIR) -I/usr/local/include
-CFLAGS=-g -W -Wall -Werror
+CFLAGS=-O3 -g -W -Wall -Werror
 LDFLAGS= -L./h2sim -L$(NGHTTP2_LIBDIR) -L/usr/local/lib \
           -lh2sim -lnghttp2 -lcrypto -lssl
 

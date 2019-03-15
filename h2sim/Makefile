@@ -8,7 +8,7 @@ CC=gcc
 RM=rm
 CPPFLAGS=-DTLS_MODE -DEPOLL_MODE -D_REENTRANT -D_GNU_SOURCE \
           -I$(NGHTTP2_INCDIR) -I/usr/local/include
-CFLAGS=-g -W -Wall -Werror
+CFLAGS=-O3 -g -W -Wall -Werror
 #LDFLAGS=
 
 LIBH2SIM_HDRS=h2.h h2_priv.h
