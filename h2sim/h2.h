@@ -135,6 +135,8 @@ typedef void (*h2_sess_free_cb)(h2_sess *sess, void *sess_user_data);
 typedef void (*h2_strm_free_cb)(h2_strm *strm, void *strm_user_data);
 typedef void (*h2_svr_free_cb)(h2_svr *svr, void *svr_user_data);
 
+h2_ctx *h2_sess_ctx(h2_sess *sess);
+
 /* trigger to terminate session; session is destroyed later */
 int h2_sess_terminate(h2_sess *sess);
   /* returns: 0(terminated), 1(already terminated), <(error) */

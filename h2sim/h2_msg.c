@@ -147,6 +147,7 @@ void h2_msg_init_static(h2_msg *msg) {
   /* NOTE: body is not touched */
   /* PRIVATE */
   if (msg) {
+    memset(msg, 0, offsetof(h2_msg, sbuf));
     h2_sbuf_init(&msg->sbuf, sizeof(msg->sbuf_buf), H2_MSG_SBUF_EXT_STEP);
   } 
 }

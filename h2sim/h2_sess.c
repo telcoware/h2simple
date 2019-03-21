@@ -864,6 +864,10 @@ void h2_sess_free(h2_sess *sess) {
   free(sess);
 }
 
+h2_ctx *h2_sess_ctx(h2_sess *sess) {
+  return (sess)? sess->ctx : NULL;
+}
+
 int h2_sess_terminate(h2_sess *sess) {
   if (sess->is_terminated) {
     return 1;  /* already terminated */

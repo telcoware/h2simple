@@ -388,6 +388,10 @@ static void help(char *prog) {
   fprintf(stderr, "  -P req_parallel       # default:1\n");
   fprintf(stderr, "  -C req_max_count      # default:1\n");
   fprintf(stderr, "  -R symbol=format      # rep default:1\n");
+#ifdef TLS_MODE
+  fprintf(stderr, "  -k key_file           # default:eckey.pem\n");
+  fprintf(stderr, "  -c cert_file          # default:eccert.pem\n");
+#endif
   fprintf(stderr, "  -Q                    # h2sim io quiet mode\n");
   fprintf(stderr, "  -q                    # all quiet mode\n");
   fprintf(stderr, "request_options:\n");
@@ -447,6 +451,10 @@ void sighdlr_mark_stop(int signo) {
 
 int main(int argc, char **argv) {
   int verbose_h2 = 1;
+#ifdef TLS_MODE
+  char *key_file = "eckey.pem";    /* default private key file */
+  char *cert_file = "eccert.pem";  /* default certificate file */
+#endif
   client_job_t job = {
     .req_par = 1,
     .req_max = 1,
@@ -465,7 +473,7 @@ int main(int argc, char **argv) {
 
   int c;
   char scale;
-  while ((c = getopt(argc, argv, "P:C:R:Qqm:u:s:a:p:x:t:b:f:e:h")) >= 0) {
+  while ((c = getopt(argc, argv, "P:C:R:k:c:Qqm:u:s:a:p:x:t:b:f:e:h")) >= 0) {
     switch (c) {
     /* client run options */
     case 'P':  /* concurrent requests (ie. streams) */
@@ -473,7 +481,7 @@ int main(int argc, char **argv) {
       if (job.req_par <= 0)
         job.req_par = 1;
       break;
-    case 'C':  /* total request counts */
+    case 'N':  /* total request counts */
       job.req_max = atoi(optarg);
       if (job.req_max <= 0)
         job.req_max = 1; break;
@@ -482,6 +490,14 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
       }
       break;
+#ifdef TLS_MODE
+    case 'k':  /* NOTE: K on server case */
+      key_file = optarg;
+      break;
+    case 'c':  /* NOTE: S on server case */
+      cert_file = optarg;
+      break;
+#endif
     case 'Q':
       verbose_h2 = 0;
       break;
@@ -606,7 +622,7 @@ int main(int argc, char **argv) {
 #ifdef TLS_MODE
   SSL_load_error_strings();
   SSL_library_init();
-  ssl_ctx = h2_ssl_ctx_init(0/*client*/, NULL, NULL);
+  ssl_ctx = h2_ssl_ctx_init(0/*client*/, key_file, cert_file);
 #endif
   ctx = h2_ctx_init(verbose_h2);
 
