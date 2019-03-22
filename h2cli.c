@@ -96,6 +96,8 @@ typedef struct client_job {
   /* request job configuration */
   int req_par;
   int req_max; 
+  int req_tps;  /* 0: for unlimited */
+
   /* replace symbol format */
   repl_sym_fmt_t repl_sym[CLIENT_JOB_REPL_SYM_MAX];
   int repl_sym_num;
@@ -113,6 +115,9 @@ typedef struct client_job {
   /* response status */
   int rsp_num;  /* reponse message count */
 
+  /* request tps control; managed by sleep_for_req_tps() */
+  struct timeval start_tv;
+
 } client_job_t;
 
 /* server connections per <scheme, authority> */
@@ -125,7 +130,11 @@ typedef struct client_sess {
 #define CLI_SESS_MAX  100
 client_sess_t cli_sess[CLI_SESS_MAX];
 int cli_sess_num = 0;
-  
+
+ 
+/*
+ * Replace Symbold Utilities ------------------------------------------------
+ */
 
 static void update_replace_symbol_mask(client_job_t *job) {
   /* check and set repl_sym_mask of each repl_sym and req_step in client_job */ 
@@ -259,10 +268,29 @@ static h2_msg *gen_request(h2_msg *src, client_job_t *job,
 }
 
 
-
 /*
  * H2 Application Callbacks ------------------------------------------------
  */
+
+static void sleep_for_req_tps(client_job_t *job) { 
+  if (job->start_tv.tv_sec == 0) {
+    gettimeofday(&job->start_tv, NULL);
+  } if (job->req_tps > 0) {
+    struct timeval cur_tv, sleep_tv;
+    long long elapsed_usec, sleep_usec;
+
+    gettimeofday(&cur_tv, NULL);
+    elapsed_usec = ((cur_tv.tv_sec - job->start_tv.tv_sec) * 1000000 +
+                    (cur_tv.tv_usec - job->start_tv.tv_usec));
+    sleep_usec = ((long long)(job->req_cnt) * 1000000 / job->req_tps
+                  - elapsed_usec);
+    if (sleep_usec >= 1) {
+      sleep_tv.tv_sec = sleep_usec / 1000000;
+      sleep_tv.tv_usec = sleep_usec % 1000000;
+      select(0, NULL, NULL, NULL, &sleep_tv);
+    }
+  }
+}
 
 static int start_request(client_job_t *job) {
   int i, r;
@@ -286,6 +314,7 @@ static int start_request(client_job_t *job) {
                   req_task->req_id, req_task->req_step, req_task->par_idx);
     }
 
+    sleep_for_req_tps(job);
     r = h2_send_request(job->req_step_sess[0], req, NULL, req_task);
     h2_msg_free(req);
     if (r < 0) {
@@ -330,7 +359,7 @@ static int response_cb(h2_sess *sess, h2_msg *rsp, void *ctx_user_data,
   /* send new request */
   h2_msg *req = gen_request(job->req_step_msg[req_task->req_step], job,
                             job->repl_sym_mask[req_task->req_step], req_task);
-
+  sleep_for_req_tps(job);
   h2_send_request(job->req_step_sess[req_task->req_step], req, NULL, req_task);
   h2_msg_free(req); 
   return 0;
@@ -387,6 +416,7 @@ static void help(char *prog) {
   fprintf(stderr, "client_run_options:\n");
   fprintf(stderr, "  -P req_parallel       # default:1\n");
   fprintf(stderr, "  -C req_max_count      # default:1\n");
+  fprintf(stderr, "  -T req_tps            # request tps; 0 for unlimited; default:0\n");
   fprintf(stderr, "  -R symbol=format      # rep default:1\n");
 #ifdef TLS_MODE
   fprintf(stderr, "  -k key_file           # default:eckey.pem\n");
@@ -458,6 +488,7 @@ int main(int argc, char **argv) {
   client_job_t job = {
     .req_par = 1,
     .req_max = 1,
+    .req_tps = 0,
   };
   void *body;
   int body_len;
@@ -473,7 +504,7 @@ int main(int argc, char **argv) {
 
   int c;
   char scale;
-  while ((c = getopt(argc, argv, "P:C:R:k:c:Qqm:u:s:a:p:x:t:b:f:e:h")) >= 0) {
+  while ((c = getopt(argc, argv, "P:C:T:R:k:c:Qqm:u:s:a:p:x:t:b:f:e:h")) >= 0) {
     switch (c) {
     /* client run options */
     case 'P':  /* concurrent requests (ie. streams) */
@@ -481,10 +512,14 @@ int main(int argc, char **argv) {
       if (job.req_par <= 0)
         job.req_par = 1;
       break;
-    case 'N':  /* total request counts */
+    case 'C':  /* total request counts */
       job.req_max = atoi(optarg);
       if (job.req_max <= 0)
-        job.req_max = 1; break;
+        job.req_max = 1;
+      break;
+    case 'T':
+      job.req_tps = atoi(optarg);
+      break;
     case 'R':
       if (get_replace_symbol(optarg, &job) < 0) {
         return EXIT_FAILURE;

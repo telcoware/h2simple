@@ -207,8 +207,8 @@ static void help(char *prog) {
   fprintf(stderr, "Usage: %s [server_options] [rsp_case_options]...\n", prog);
   fprintf(stderr, "server_options:\n");
 #ifdef TLS_MODE
-  fprintf(stderr, "  -K key_file                # default:eckey.pem\n");
-  fprintf(stderr, "  -C cert_file               # default:eccert.pem\n");
+  fprintf(stderr, "  -k key_file                # default:eckey.pem\n");
+  fprintf(stderr, "  -c cert_file               # default:eccert.pem\n");
   fprintf(stderr, "  -S https://<ip>:<port>     # tls server listen ip:port\n");
 #endif
   fprintf(stderr, "  -S http://<ip>:<port>      # tcp server listen ip:port\n");
@@ -278,13 +278,13 @@ int main(int argc, char **argv) {
   int c;
   int listen_num = 0;
   char scale;
-  while ((c = getopt(argc, argv, "K:C:S:Qqm:a:p:o:s:x:t:b:f:e:d:h")) >=  0) {
+  while ((c = getopt(argc, argv, "k:c:S:Qqm:a:p:o:s:x:t:b:f:e:d:h")) >=  0) {
     switch (c) {
 #ifdef TLS_MODE
-    case 'K':
+    case 'k':
       key_file = optarg;
       break;
-    case 'C':
+    case 'c':
       cert_file = optarg;
       break;
 #endif
