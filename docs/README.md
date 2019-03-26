@@ -7,20 +7,19 @@ See: [https://github.com/setup74/h2simple](https://github.com/setup74/h2simple)
 
 ## Introduction
 
-Nghttp2 has as nice and clean event modeled C api,
-But the the http client/server code in nghttp2 pacakge
+Nghttp2 has as nice event modeled C api,
+but the http client/server codes in pacakge
 are built on C++/boost, not for clean C users.
 
-So new HTTP2 stack layer for standalone C is built, named http2simple.
-And goes with client and server simulator example code.
-
+So a HTTP2 stack layer for standalone C is built, named http2simple.
+And goes with client and server simulator example codes.
 
 
 ## Files
 
 h2sim library example application:
 - h2cli.c h2svr.c: h2sim app example code for client and server simulator
-- NOTE: use -DTLS_MODE=1 option to be built with openssl library
+- NOTE: use -DTLS_MODE=1 option to be built with openssl library (default)
 
 h2sim library files:
 - h2.h: the h2sim API defintion
