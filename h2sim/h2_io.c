@@ -442,6 +442,63 @@ static int h2_sess_recv(h2_sess *sess) {
 
 
 /*
+ * Http2 Settings Handling -------------------------------------------------
+ */
+
+void h2_settings_init(h2_settings *settings) {
+  settings->header_table_size = -1; 
+  settings->enable_push = -1;
+  settings->max_concurrent_streams = -1;
+  settings->initial_window_size = -1;
+  settings->max_frame_size = -1;
+  settings->max_header_list_size = -1;
+  settings->enable_connect_protocol = -1;
+}
+
+static int h2_sess_send_settings(h2_sess *sess, h2_settings *settings) {
+  nghttp2_settings_entry iv[16];
+  int r, iv_num = 0;
+  if (settings) {
+    if (settings->header_table_size >= 0) {
+      iv[iv_num].settings_id = NGHTTP2_SETTINGS_HEADER_TABLE_SIZE;
+      iv[iv_num++].value = settings->header_table_size;
+    }
+    if (settings->enable_push >= 0) {
+      iv[iv_num].settings_id = NGHTTP2_SETTINGS_ENABLE_PUSH;
+      iv[iv_num++].value = settings->enable_push;
+    }
+    if (settings->max_concurrent_streams >= 0) {
+      iv[iv_num].settings_id = NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS;
+      iv[iv_num++].value = settings->max_concurrent_streams;
+    }
+    if (settings->initial_window_size >= 0) {
+      iv[iv_num].settings_id = NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE;
+      iv[iv_num++].value = settings->initial_window_size;
+    }
+    if (settings->max_frame_size >= 0) {
+      iv[iv_num].settings_id = NGHTTP2_SETTINGS_MAX_FRAME_SIZE;
+      iv[iv_num++].value = settings->max_frame_size;
+    }
+    if (settings->max_header_list_size >= 0) {
+      iv[iv_num].settings_id = NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE;
+      iv[iv_num++].value = settings->max_header_list_size;
+    }
+    if (settings->enable_connect_protocol >= 0) {
+      iv[iv_num].settings_id = NGHTTP2_SETTINGS_ENABLE_CONNECT_PROTOCOL;
+      iv[iv_num++].value = settings->enable_connect_protocol;
+    }
+  }
+
+  r = nghttp2_submit_settings(sess->ng_sess, NGHTTP2_FLAG_NONE, iv, iv_num);
+  if (r != 0) {
+    warnx("submit setting failed: %s", nghttp2_strerror(r));
+    return -1;
+  }
+  return h2_sess_send(sess);
+}
+
+
+/*
  * Client Session I/O ------------------------------------------------------
  */
 
@@ -506,20 +563,9 @@ static h2_sess *h2_sess_init_client(h2_ctx *ctx, SSL *ssl,
   return sess;
 }
 
-static void h2_sess_client_send_conn_hdr(h2_sess *sess) {
-  nghttp2_settings_entry iv[1] = {
-      {NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 100}};
-  int r;
-
-  /* client 24 bytes magic string will be sent by nghttp2 library */
-  r = nghttp2_submit_settings(sess->ng_sess, NGHTTP2_FLAG_NONE, iv, 1);
-  if (r != 0) {
-    errx(1, "cannot not submit setttings: %s", nghttp2_strerror(r));
-  }
-}
-
 static h2_sess *h2_sess_client_start(int sock, h2_ctx *ctx,
-                    const char *authority, SSL_CTX *client_ssl_ctx) {
+                    const char *authority, SSL_CTX *client_ssl_ctx,
+                    h2_settings *settings) {
   SSL *ssl = NULL;
 #ifdef TLS_MODE
 #else
@@ -567,15 +613,14 @@ static h2_sess *h2_sess_client_start(int sock, h2_ctx *ctx,
 #endif /* TLS_MODE */
   
   h2_sess *sess = h2_sess_init_client(ctx, ssl, sock, authority);
-
-  /* send HTTP/2 client start message */
-  h2_sess_client_send_conn_hdr(sess);
-  if (h2_sess_send(sess) < 0) {
-    h2_sess_free(sess);
+  if (sess == NULL) {
     return NULL;
   }
 
-  h2_set_nonblock(sock);
+  if (h2_sess_send_settings(sess, settings) < 0) {
+    h2_sess_free(sess);
+    return NULL;
+  }
 
   if (client_ssl_ctx) {
     fprintf(stderr, "%sCONNECTED TLS TO %s\n", sess->log_prefix, authority);
@@ -587,6 +632,7 @@ static h2_sess *h2_sess_client_start(int sock, h2_ctx *ctx,
 
 /* Start connecting to the remote peer |host:port| */
 h2_sess *h2_connect(h2_ctx *ctx, const char *authority, SSL_CTX *cli_ssl_ctx,
+                    h2_settings *settings,
                     h2_response_cb response_cb,
                     h2_push_promise_cb push_promise_cb,
                     h2_push_response_cb push_response_cb,
@@ -634,7 +680,8 @@ h2_sess *h2_connect(h2_ctx *ctx, const char *authority, SSL_CTX *cli_ssl_ctx,
       h2_set_close_exec(sock);
       if (connect(sock, ai->ai_addr, ai->ai_addrlen) == 0) {
         /* connect succeeded */
-        if ((sess = h2_sess_client_start(sock, ctx, authority, cli_ssl_ctx))) {
+        if ((sess = h2_sess_client_start(sock, ctx, authority,
+                                         cli_ssl_ctx, settings))) {
           break;
         }
       }
@@ -654,6 +701,7 @@ h2_sess *h2_connect(h2_ctx *ctx, const char *authority, SSL_CTX *cli_ssl_ctx,
   sess->sess_free_cb = sess_free_cb;
   sess->user_data = sess_user_data;
 
+  h2_set_nonblock(sess->fd);
   return sess;
 }
 
@@ -662,41 +710,25 @@ h2_sess *h2_connect(h2_ctx *ctx, const char *authority, SSL_CTX *cli_ssl_ctx,
  * Server Session I/O ------------------------------------------------------
  */
 
-/* Send HTTP/2 client connection header, which includes 24 bytes */
-/* magic octets and SETTINGS frame */
-static int h2_sess_server_send_conn_hdr(h2_sess *sess) {
-  nghttp2_settings_entry iv[] = {
-      { NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 100 } };
-
-  int r = nghttp2_submit_settings(sess->ng_sess, NGHTTP2_FLAG_NONE, iv, 1);
-  if (r != 0) {
-    warnx("submit setting failed: %s", nghttp2_strerror(r));
-    return -1;
-  }
-  if (h2_sess_send(sess) < 0) {
-    return -2;
-  }
-  return 0;
-}
-
-static int h2_sess_server_tcp_start(h2_sess *sess)
+static int h2_sess_server_tcp_start(h2_sess *sess, h2_settings *settings)
 {
-  fprintf(stderr, "%sCONNECTED TCP\n", sess->log_prefix);
-
   h2_sess_nghttp2_init(sess);
 
-  return h2_sess_server_send_conn_hdr(sess);
+  if (h2_sess_send_settings(sess, settings) < 0) {
+    return -1;
+  }
+
+  fprintf(stderr, "%sCONNECTED TCP\n", sess->log_prefix);
+  return 0;
 }
 
 
 #ifdef TLS_MODE
-static int h2_sess_server_tls_start(h2_sess *sess)
+static int h2_sess_server_tls_start(h2_sess *sess, h2_settings *settings)
 {
   const unsigned char *alpn = NULL;
   unsigned int alpnlen = 0;
   SSL *ssl = sess->ssl;
-
-  fprintf(stderr, "%sCONNECTED TLS\n", sess->log_prefix);
 
   SSL_get0_alpn_selected(ssl, &alpn, &alpnlen);
   if (alpn == NULL || alpnlen != 2 || memcmp("h2", alpn, 2) != 0) {
@@ -707,9 +739,11 @@ static int h2_sess_server_tls_start(h2_sess *sess)
 
   h2_sess_nghttp2_init(sess);
 
-  if (h2_sess_server_send_conn_hdr(sess) < 0) {
-    return -2;
+  if (h2_sess_send_settings(sess, settings) < 0) {
+    return -1;
   }
+
+  fprintf(stderr, "%sCONNECTED TLS\n", sess->log_prefix);
   return 0;
 }
 #endif
@@ -766,9 +800,12 @@ static h2_sess *h2_sess_init_server(h2_ctx *ctx, h2_svr *svr, int fd,
 
   /* call user accept callback */
   SSL_CTX *sess_ssl_ctx = NULL;
+  h2_settings sess_settings;
+  h2_settings_init(&sess_settings);
   if (svr->accept_cb) {
     int r = svr->accept_cb(svr, svr->user_data, host, port,
-                           &sess_ssl_ctx, &sess->request_cb,
+                           &sess_ssl_ctx, &sess_settings,
+                           &sess->request_cb,
                            &sess->sess_free_cb, &sess->user_data);
     if (r < 0) {
       warnx("%saccept_cb failed: %d", sess->log_prefix, r);
@@ -795,20 +832,20 @@ static h2_sess *h2_sess_init_server(h2_ctx *ctx, h2_svr *svr, int fd,
       h2_sess_free(sess);
       return NULL;
     }
-    if (h2_sess_server_tls_start(sess) < 0)  {
+    if (h2_sess_server_tls_start(sess, &sess_settings) < 0)  {
       h2_sess_free(sess);
       return NULL;
     }
   } else
 #endif
   {
-    if (h2_sess_server_tcp_start(sess) < 0) {
+    if (h2_sess_server_tcp_start(sess, &sess_settings) < 0) {
       h2_sess_free(sess);
       return NULL;
     }
   }
 
-  h2_set_nonblock(fd);
+  h2_set_nonblock(sess->fd);
   return sess;
 }
 

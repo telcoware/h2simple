@@ -56,16 +56,17 @@ struct nghttp2_session;
  */
 
 /* forward declaration */
+typedef struct h2_obj h2_obj;
 typedef struct h2_cls h2_cls;
 
-typedef struct h2_obj {
+struct h2_obj {
   h2_cls *cls;  /* pointer to class object */
-} h2_obj;
+};
 
-typedef struct h2_cls {
-  h2_obj obj;   /* class obj */
+struct h2_cls {
+  struct h2_obj obj;   /* class obj */
   const char *name;
-} h2_cls;
+};
 
 /* global variables representing the entry class; defined in h2_sess.c */
 extern h2_cls h2_cls_cls;
@@ -130,7 +131,7 @@ typedef struct h2_hdr {
   h2_sbuf_idx value;
 } h2_hdr;
 
-typedef struct h2_msg {
+struct h2_msg {
   /* request pseudo header; pointer on sbuf */
   h2_sbuf_idx method;
   h2_sbuf_idx scheme;
@@ -150,7 +151,7 @@ typedef struct h2_msg {
   /* sbuf for header */
   h2_sbuf sbuf;
   char sbuf_buf[H2_MSG_SBUF_SIZE];
-} h2_msg;
+};
 
 /* initialize static message buffer; sbuf init/cleaned; body not touched */
 void h2_msg_init_static(h2_msg *msg);
@@ -170,7 +171,7 @@ typedef struct h2_read_buf {
   int send_msg_type;  /* H2_REQUEST/RESPONSE/PUSH_PROMISE/PUSH_RESPONSE */
 } h2_read_buf;
 
-typedef struct h2_strm {
+struct h2_strm {
   h2_obj obj;
   h2_strm *prev, *next;
 
@@ -186,7 +187,7 @@ typedef struct h2_strm {
   void *user_data;          /* for client stream only; set at request submit */
 
   int response_sent;        /* set when h2_send_response() is called */
-} h2_strm;
+};
 
 
 /*
@@ -219,7 +220,7 @@ typedef struct h2_wr_buf {
 #define CLOSE_BY_NGHTTP2_ERR  (-4)
 #define CLOSE_BY_NGHTTP2_END  (-5)
 
-typedef struct h2_sess {
+struct h2_sess {
   h2_obj obj;
   h2_sess *prev, *next;
   h2_strm strm_list_head;
@@ -252,7 +253,7 @@ typedef struct h2_sess {
   h2_sess_free_cb sess_free_cb;
   void *user_data;
 
-} h2_sess;
+};
 
 /* sess management */
 void h2_sess_nghttp2_init(h2_sess *sess);
@@ -263,7 +264,7 @@ void h2_sess_free(h2_sess *sess);
  * Server Listen Context ---------------------------------------------------
  */
 
-typedef struct h2_svr {
+struct h2_svr {
   h2_obj obj;
   struct h2_svr *prev, *next;
   h2_ctx *ctx;
@@ -278,14 +279,14 @@ typedef struct h2_svr {
   h2_svr_free_cb svr_free_cb;
   void *user_data; 
 
-} h2_svr;
+};
 
  
 /*
  * Context Utilities -------------------------------------------------------
  */
 
-typedef struct h2_ctx {
+struct h2_ctx {
   h2_obj obj;
   h2_sess sess_list_head;
   int sess_num; 
@@ -304,7 +305,7 @@ typedef struct h2_ctx {
   /* verbose flag */
   int verbose;
 
-} h2_ctx;
+};
 
 
 #endif  /* __h2_priv_h__ */

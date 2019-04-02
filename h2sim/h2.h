@@ -127,6 +127,23 @@ void h2_dump_msg(FILE *fp, h2_msg *msg, const char *line_prefix,
                  const char *msg_name_fmt, ...);
 
 
+/* Session Http2 Settings ------------------------------------------------ */
+
+#define H2_SETTINGS_MAX  8
+
+typedef struct h2_settings {  /* use value 0 for default value */
+  int header_table_size;  
+  int enable_push;
+  int max_concurrent_streams;
+  int initial_window_size;
+  int max_frame_size;
+  int max_header_list_size;
+  int enable_connect_protocol;
+} h2_settings;
+
+void h2_settings_init(h2_settings *settingss);  /* must be call before set */
+
+
 /* Session Common API Calls and Callbacks -------------------------------- */
 
 /* to be called at session, stream, server socket is closed */
@@ -161,12 +178,14 @@ typedef int (*h2_push_response_cb)(
   /* returns: 0(ok), 0<(error) */
 
 /* client side context create api to start session */
-h2_sess *h2_connect(h2_ctx *ctx, const char *authority, SSL_CTX *cli_ssl_ctx,
+h2_sess *h2_connect(h2_ctx *ctx, const char *authority,
+                    SSL_CTX *cli_ssl_ctx,
+                    h2_settings *settings,
                     h2_response_cb response_cb, 
                     h2_push_promise_cb push_promise_cb,
                     h2_push_response_cb push_response_cb,
                     h2_sess_free_cb sess_free_cb, void *sess_user_data);
-  /* cls_ssl_ctx=NULL for tcp mode */
+  /* cli_ssl_ctx, settings might be null */
 
 /* h2 client application api for request */
 int h2_send_request(h2_sess *sess, h2_msg *req,
@@ -196,6 +215,7 @@ typedef int (*h2_accept_cb)(h2_svr *svr, void *svr_user_data,
                     const char *peer_ip, unsigned short peer_port,
                     /* return parameters for accepted sess */
                     SSL_CTX **sess_ssl_ctx_ret,
+                    h2_settings *sesttings_ret,
                     h2_request_cb *request_cb_ret,
                     h2_sess_free_cb *sess_free_cb_ret,
                     void **sess_user_data_ret);
@@ -231,6 +251,12 @@ int h2_body_from_hex_str(char *hex_str, void **body_ret, int *body_len_ret);
 int h2_body_from_file(char *file, void **body_ret, int *body_len_ret);
   /* returns dynamic alloced data via *body_ret */
 
+
+/* Settings Parameter Utilties ------------------------------------------- */
+
+int h2_set_settings(h2_settings *settings, char *id_value_str);
+  /* id_value_str is <id>=<value> formatted string */
+  /* returns 0(ok) or <0(failed) */
 
 
 #endif  /* __h2_h__ */

@@ -53,6 +53,8 @@
 
 int verbose = 1;
 
+h2_settings h2svr_settings;
+
 
 #define GET_FILE   1  /* GET request handling for file of request path */
 
@@ -177,7 +179,8 @@ int request_cb(h2_sess *sess, h2_strm *strm,
 
 int accept_cb(h2_svr *svr, void *server_user_data,
               const char *peer_ip, unsigned short peer_port,
-              SSL_CTX **ssl_ctx_ret, h2_request_cb *request_cb_ret,
+              SSL_CTX **ssl_ctx_ret, h2_settings *settings_ret,
+              h2_request_cb *request_cb_ret,
               h2_sess_free_cb *sess_free_cb_ret, void **sess_user_data_ret) {
   (void)svr;
   (void)peer_ip;
@@ -185,6 +188,7 @@ int accept_cb(h2_svr *svr, void *server_user_data,
 
   /* set accepted session paramters */
   *ssl_ctx_ret = NULL/* use svr_ssl_ctx */;
+  *settings_ret = h2svr_settings;
   *request_cb_ret = request_cb;
   *sess_free_cb_ret = NULL/* static user data */;
   *sess_user_data_ret = server_user_data/* app_ctx * */; 
@@ -212,6 +216,10 @@ static void help(char *prog) {
   fprintf(stderr, "  -S https://<ip>:<port>     # tls server listen ip:port\n");
 #endif
   fprintf(stderr, "  -S http://<ip>:<port>      # tcp server listen ip:port\n");
+  fprintf(stderr, "  -H <settings_id>=<value>   # set http2 settings value\n");
+  fprintf(stderr, "     # <settings_id> := header_table_size | enable_push |\n");
+  fprintf(stderr, "     #   max_concurent_stream, initial_window_size | max_frame_size\n");
+  fprintf(stderr, "     #   max_header_list_size, enable_connect_protocol\n");
   fprintf(stderr, "  -Q                         # h2sim io quiet mode\n");
   fprintf(stderr, "  -q                         # all quiet mode\n");
   fprintf(stderr, "rsp_case_options:\n");
@@ -261,6 +269,8 @@ int main(int argc, char **argv) {
   void *body;
   int body_len;
 
+  h2_settings_init(&h2svr_settings);
+
   /* intialize current response case */
   int rc_is_push_prm = 0;
   http2_rsp_case *rc = &app_ctx.rsp_case[0];
@@ -278,7 +288,7 @@ int main(int argc, char **argv) {
   int c;
   int listen_num = 0;
   char scale;
-  while ((c = getopt(argc, argv, "k:c:S:Qqm:a:p:o:s:x:t:b:f:e:d:h")) >=  0) {
+  while ((c = getopt(argc, argv, "k:c:S:H:Qqm:a:p:o:s:x:t:b:f:e:d:h")) >=  0) {
     switch (c) {
 #ifdef TLS_MODE
     case 'k':
@@ -313,6 +323,12 @@ int main(int argc, char **argv) {
       }
       listen_num++;
       break;
+    case 'H':
+      if (h2_set_settings(&h2svr_settings, optarg) < 0) {
+        fprintf(stderr, "invalid argument for options <id>=<value>: %s\n",
+                optarg);
+        return EXIT_FAILURE;
+      }
     case 'Q':
       verbose_h2 = 0;
       h2_ctx_set_verbose(ctx, verbose_h2);

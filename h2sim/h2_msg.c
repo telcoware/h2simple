@@ -633,3 +633,59 @@ void h2_dump_msg(FILE *fp, h2_msg *msg, const char *line_prefix,
   }
 }
 
+
+/* Settings Parameter Utilties ------------------------------------------- */
+
+int h2_set_settings(h2_settings *settings, char *id_value_str)
+  /* id_value_str is <id>=<value> formatted string */
+  /* returns 0(ok) or <0(failed) */
+{
+  char *str, *id, *p;
+  int val;
+
+  if (settings == NULL || id_value_str == NULL) {
+    warnx("set settings: invalid arguments: settings=%p id_value_str=%p",
+          settings, id_value_str);
+    return -1;
+  }
+
+  str = strdup(id_value_str);
+  id = str;
+  if ((p = strchr(str, '=')) == NULL) {
+    warnx("set settings: format should be <id>=<value>: %s", id_value_str);
+    free(str);
+    return -1;
+  }
+  *p = '\0';  /* make id a string */
+  p++;  /* skip '=' from value */
+  if (sscanf(p, "%i", &val) != 1 || val < 0) {
+    warnx("set settings: value should be natural number: %s", p);
+    free(str);
+    return -1;
+  }
+
+  if (!strcasecmp(id, "header_table_size")) {
+    settings->header_table_size = val;
+  } else if (!strcasecmp(id, "enable_push")) {
+    settings->enable_push = val;
+  } else if (!strcasecmp(id, "max_concurrent_streams")) {
+    settings->max_concurrent_streams = val;
+  } else if (!strcasecmp(id, "initial_window_size")) {
+    settings->initial_window_size = val;
+  } else if (!strcasecmp(id, "max_frame_size")) {
+    settings->max_frame_size = val;
+  } else if (!strcasecmp(id, "max_header_list_size")) {
+    settings->max_header_list_size = val;
+  } else if (!strcasecmp(id, "enable_connect_protocol")) {
+    settings->enable_connect_protocol = val;
+  } else {
+    warnx("set settings: unknown setting identifier: %s", id);
+    free(str);
+    return -1; 
+  }
+
+  free(str);
+  return 0;
+}
+
+

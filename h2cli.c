@@ -422,6 +422,10 @@ static void help(char *prog) {
   fprintf(stderr, "  -k key_file           # default:eckey.pem\n");
   fprintf(stderr, "  -c cert_file          # default:eccert.pem\n");
 #endif
+  fprintf(stderr, "  -H <settings_id>=<value>   # set http2 settings value\n");
+  fprintf(stderr, "     # <settings_id> := header_table_size | enable_push |\n");
+  fprintf(stderr, "     #   max_concurent_stream, initial_window_size | max_frame_size\n");
+  fprintf(stderr, "     #   max_header_list_size, enable_connect_protocol\n");
   fprintf(stderr, "  -Q                    # h2sim io quiet mode\n");
   fprintf(stderr, "  -q                    # all quiet mode\n");
   fprintf(stderr, "request_options:\n");
@@ -493,6 +497,9 @@ int main(int argc, char **argv) {
   void *body;
   int body_len;
 
+  h2_settings settings;
+  h2_settings_init(&settings);
+
   h2_msg *req = h2_msg_init();
   h2_set_method(req, "GET");
 #if TLS_MODE
@@ -504,7 +511,7 @@ int main(int argc, char **argv) {
 
   int c;
   char scale;
-  while ((c = getopt(argc, argv, "P:C:T:R:k:c:Qqm:u:s:a:p:x:t:b:f:e:h")) >= 0) {
+  while ((c = getopt(argc, argv, "P:C:T:R:k:c:H:Qqm:u:s:a:p:x:t:b:f:e:h")) >= 0) {
     switch (c) {
     /* client run options */
     case 'P':  /* concurrent requests (ie. streams) */
@@ -533,6 +540,12 @@ int main(int argc, char **argv) {
       cert_file = optarg;
       break;
 #endif
+    case 'H':
+      if (h2_set_settings(&settings, optarg) < 0) {
+        fprintf(stderr, "invalid argument for options <id>=<value>: %s\n",
+                optarg);
+        return EXIT_FAILURE;
+      }
     case 'Q':
       verbose_h2 = 0;
       break;
@@ -684,6 +697,7 @@ int main(int argc, char **argv) {
       cli_sess[j].authority = authority;
       cli_sess[j].sess = h2_connect(ctx, authority,
                                !strcasecmp(scheme, "https")? ssl_ctx : NULL,
+                               &settings,
                                response_cb, push_promise_cb, push_response_cb,
                                NULL/*static user data*/, &job);
       job.req_step_sess[i] = cli_sess[j].sess;
