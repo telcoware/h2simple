@@ -72,6 +72,7 @@ struct h2_cls {
 extern h2_cls h2_cls_cls;
 extern h2_cls h2_cls_strm;
 extern h2_cls h2_cls_sess;
+extern h2_cls h2_cls_peer;
 extern h2_cls h2_cls_svr;
 extern h2_cls h2_cls_ctx;
 
@@ -168,7 +169,7 @@ typedef struct h2_read_buf {
   int data_size;
   int data_used;
   int to_be_freed;
-  int send_msg_type;  /* H2_REQUEST/RESPONSE/PUSH_PROMISE/PUSH_RESPONSE */
+  int send_msg_type;        /* H2_REQUEST/RESPONSE/PUSH_PROMISE/PUSH_RESPONSE */
 } h2_read_buf;
 
 struct h2_strm {
@@ -186,6 +187,7 @@ struct h2_strm {
   h2_strm_free_cb strm_free_cb;
   void *user_data;          /* for client stream only; set at request submit */
 
+  int is_req;               /* set whee strm is created by h2_send_request() */
   int response_sent;        /* set when h2_send_response() is called */
 };
 
@@ -202,7 +204,7 @@ struct h2_strm {
 /*       send size needs to be just NOT too small */
 /* NOTE: PERF: BIGGER WINDOW_SIZE shows no significant perf up */
 /* NOTE: PERF: BIGGER CONCURRENT_STREAM option shows NO significant perf up */
-#define H2_WR_BUF_SIZE  1024
+#define H2_WR_BUF_SIZE  (4 * 1024)
 
 typedef struct h2_wr_buf {
   /* last pending merge buffer */
@@ -223,9 +225,10 @@ typedef struct h2_wr_buf {
 struct h2_sess {
   h2_obj obj;
   h2_sess *prev, *next;
-  h2_strm strm_list_head;
   h2_ctx *ctx;
   int is_server;
+
+  h2_strm strm_list_head;
 
   struct nghttp2_session *ng_sess;
   SSL *ssl;                 /* non-NULL for tsl sess only */
@@ -235,12 +238,16 @@ struct h2_sess {
 
   h2_wr_buf wr_buf;         /* write buffer for nonblocing send */
   int send_pending;         /* mark when send skipping by would block */
+  
+  int send_data_remain;     /* sum of h2_read_buf remains to be sent */
 
-  int stream_close_cnt;
+  int req_cnt;              /* for client, is_server=0 only */
+  int rsp_cnt;              /* for client, is_server=0 only */
+  int strm_close_cnt;
   struct timeval tv_begin;
   struct timeval tv_end;
 
-  int is_terminated;        /* set when h2_sess_terminate() */
+  int is_terminated;        /* 1:immediate, 2:wait_rsp */
 
   /* server callbacks */
   h2_request_cb request_cb;
@@ -252,12 +259,58 @@ struct h2_sess {
   /* user data */
   h2_sess_free_cb sess_free_cb;
   void *user_data;
-
 };
 
 /* sess management */
 void h2_sess_nghttp2_init(h2_sess *sess);
 void h2_sess_free(h2_sess *sess);
+
+/* mark something to be sent */
+void h2_sess_mark_send_pending(h2_sess *sess);
+int h2_sess_send(h2_sess *sess);
+
+
+/*
+ * Peer Utilities ----------------------------------------------------------
+ * warp up entry for multiples sessions for client api
+ */
+
+struct h2_peer {
+  h2_obj obj;
+  struct h2_peer *prev, *next;
+  h2_ctx *ctx;
+
+  int sess_num;
+  int req_thr_for_reconn;
+
+  int is_terminated;        /* 1:immediate, 2:wait_rsp */
+
+  /* configuration for client session */
+  char *authority;          /* dyanmic alloced */
+  SSL_CTX *ssl_ctx;
+  h2_settings settings;
+  h2_peer_response_cb response_cb;
+  h2_peer_push_promise_cb push_promise_cb;
+  h2_peer_push_response_cb push_response_cb;
+  h2_peer_free_cb peer_free_cb;
+  void *user_data;
+
+  /* sessions and load balancing status */
+  h2_sess **sess;           /* dynamic sess[sess_num] */
+  int next_sess_idx;
+  int *act_sess;            /* dynamic int[sess_num]; mark in act_sess_num */
+  int act_sess_num;         /* number of connected sessions */
+
+  /* performance counts */
+  int req_cnt;              /* assume peer is for client only */
+  int rsp_cnt;              /* assume peer is for clinet only */
+  int strm_close_cnt;       /* aggregated from sess */
+  int sess_close_cnt;
+  struct timeval tv_begin;
+  struct timeval tv_end;
+};
+
+void h2_peer_free(h2_peer *peer);
 
 
 /*
@@ -278,7 +331,6 @@ struct h2_svr {
   /* user data */
   h2_svr_free_cb svr_free_cb;
   void *user_data; 
-
 };
 
  
@@ -288,11 +340,15 @@ struct h2_svr {
 
 struct h2_ctx {
   h2_obj obj;
+
   h2_sess sess_list_head;
   int sess_num; 
 
   h2_svr svr_list_head;
   int svr_num;
+
+  h2_peer peer_list_head;
+  int peer_num;
 
 #ifdef EPOLL_MODE
   int epoll_fd;
@@ -304,7 +360,6 @@ struct h2_ctx {
 
   /* verbose flag */
   int verbose;
-
 };
 
 

@@ -91,12 +91,20 @@ typedef struct {
   int prm_num;   /* push promize per this request */
 } req_task_t;
 
+/* server connections per <scheme, authority> */
+/* TODO: MAY NEED TO BE PROMOTED TO h2_peer */
+typedef struct {
+  const char *scheme;
+  const char *authority;
+  h2_peer *peer;
+} svr_peer_t;
+
 /* client job to be handled by run(); set by runtime parameters */
 typedef struct client_job {
   /* request job configuration */
   int req_par;
   int req_max; 
-  int req_tps;  /* 0: for unlimited */
+  int req_tps;  /* 0:unlimited */
 
   /* replace symbol format */
   repl_sym_fmt_t repl_sym[CLIENT_JOB_REPL_SYM_MAX];
@@ -109,7 +117,7 @@ typedef struct client_job {
   int req_cnt;  /* current request status; req_psr_tasks per each req_cnt */
   req_task_t *req_par_task;  /* alloced as req_task_t[req_par] */
   h2_msg *req_step_msg[REQ_STEP_MAX];
-  h2_sess *req_step_sess[REQ_STEP_MAX];
+  h2_peer *req_step_peer[REQ_STEP_MAX];
   int req_step_num;
 
   /* response status */
@@ -117,19 +125,11 @@ typedef struct client_job {
 
   /* request tps control; managed by sleep_for_req_tps() */
   struct timeval start_tv;
-
 } client_job_t;
 
-/* server connections per <scheme, authority> */
-typedef struct client_sess {
-  const char *scheme;
-  const char *authority;
-  h2_sess *sess;
-} client_sess_t;
-
-#define CLI_SESS_MAX  100
-client_sess_t cli_sess[CLI_SESS_MAX];
-int cli_sess_num = 0;
+#define SVR_PEER_MAX  100
+svr_peer_t svr_peers[SVR_PEER_MAX];
+int svr_peer_num = 0;
 
  
 /*
@@ -315,7 +315,8 @@ static int start_request(client_job_t *job) {
     }
 
     sleep_for_req_tps(job);
-    r = h2_send_request(job->req_step_sess[0], req, NULL, req_task);
+    r = h2_peer_send_request(job->req_step_peer[req_task->req_step],
+                             req, NULL, req_task);
     h2_msg_free(req);
     if (r < 0) {
       break;
@@ -324,11 +325,10 @@ static int start_request(client_job_t *job) {
   return 0;
 }
 
-static int response_cb(h2_sess *sess, h2_msg *rsp, void *ctx_user_data,
-                       void *req_stream_user_data) {
-  client_job_t *job = ctx_user_data;
-  req_task_t *req_task = req_stream_user_data;
-  (void)sess;
+static int response_cb(h2_peer *peer, h2_msg *rsp, void *peer_user_data,
+                       void *strm_user_data) {
+  client_job_t *job = peer_user_data;
+  req_task_t *req_task = strm_user_data;
   (void)rsp;
 
   job->rsp_num++;
@@ -347,10 +347,10 @@ static int response_cb(h2_sess *sess, h2_msg *rsp, void *ctx_user_data,
     req_task->prm_num = 0;
   } else {
     if (job->rsp_num >= job->req_max * job->req_step_num) {
-      /* NOTE: all sessions are closed at once */
+      /* NOTE: all peers are closed at once */
       int i;
-      for (i = 0; i < cli_sess_num; i++) {
-        h2_sess_terminate(cli_sess[i].sess);
+      for (i = 0; i < svr_peer_num; i++) {
+        h2_peer_terminate(svr_peers[i].peer, 0);
       }
     }
     return 0;  /* no more request stream */
@@ -360,8 +360,8 @@ static int response_cb(h2_sess *sess, h2_msg *rsp, void *ctx_user_data,
   h2_msg *req = gen_request(job->req_step_msg[req_task->req_step], job,
                             job->repl_sym_mask[req_task->req_step], req_task);
   sleep_for_req_tps(job);
-  h2_send_request(job->req_step_sess[req_task->req_step], req, NULL, req_task);
-  h2_msg_free(req); 
+  h2_peer_send_request(peer, req, NULL, req_task);
+  h2_msg_free(req);
   return 0;
 }
 
@@ -370,13 +370,13 @@ static void push_strm_free_cb(h2_strm *strm, void *user_data) {
   free(user_data); 
 }
 
-static int push_promise_cb(h2_sess *sess, h2_msg *prm_req,
-                           void *sess_user_data, void *strm_user_data,
+static int push_promise_cb(h2_peer *peer, h2_msg *prm_req,
+                           void *peer_user_data, void *strm_user_data,
                            h2_strm_free_cb *push_strm_free_cb_ret,
                            void **push_strm_user_data_ret) {
   req_task_t *req_task = strm_user_data;
-  (void)sess;
-  (void)sess_user_data;
+  (void)peer;
+  (void)peer_user_data;
 
   req_task->prm_num++;
 
@@ -391,11 +391,11 @@ static int push_promise_cb(h2_sess *sess, h2_msg *prm_req,
   return 0;
 }
 
-static int push_response_cb(h2_sess *sess, h2_msg *prm_rsp,
-                            void *sess_user_data, void *push_stream_user_data) {
+static int push_response_cb(h2_peer *peer, h2_msg *prm_rsp,
+                            void *peer_user_data, void *push_stream_user_data) {
   char *prm_req_path = push_stream_user_data;
-  (void)sess;
-  (void)sess_user_data;
+  (void)peer;
+  (void)peer_user_data;
   
   if (verbose) {
     h2_dump_msg(stdout, prm_rsp, "", "PUSH_RESPONSE on %s", prm_req_path);
@@ -417,6 +417,8 @@ static void help(char *prog) {
   fprintf(stderr, "  -P req_parallel       # default:1\n");
   fprintf(stderr, "  -C req_max_count      # default:1\n");
   fprintf(stderr, "  -T req_tps            # request tps; 0 for unlimited; default:0\n");
+  fprintf(stderr, "  -S sess_per_peer      # sessions per server: default:1\n");
+  fprintf(stderr, "  -L req_thr_for_reconn # default:0(unlimited)\n");
   fprintf(stderr, "  -R symbol=format      # rep default:1\n");
 #ifdef TLS_MODE
   fprintf(stderr, "  -k key_file           # default:eckey.pem\n");
@@ -494,6 +496,8 @@ int main(int argc, char **argv) {
     .req_max = 1,
     .req_tps = 0,
   };
+  int sess_per_svr = 1;
+  int req_thr_for_reconn = 0; /* 0:unlimited */
   void *body;
   int body_len;
 
@@ -511,7 +515,7 @@ int main(int argc, char **argv) {
 
   int c;
   char scale;
-  while ((c = getopt(argc, argv, "P:C:T:R:k:c:H:Qqm:u:s:a:p:x:t:b:f:e:h")) >= 0) {
+  while ((c = getopt(argc, argv, "P:C:T:S:R:k:c:H:L:Qqm:u:s:a:p:x:t:b:f:e:h")) >= 0) {
     switch (c) {
     /* client run options */
     case 'P':  /* concurrent requests (ie. streams) */
@@ -526,6 +530,12 @@ int main(int argc, char **argv) {
       break;
     case 'T':
       job.req_tps = atoi(optarg);
+      break;
+    case 'S':
+      sess_per_svr = atoi(optarg);
+      break;
+    case 'L':
+      req_thr_for_reconn = atoi(optarg);
       break;
     case 'R':
       if (get_replace_symbol(optarg, &job) < 0) {
@@ -679,32 +689,34 @@ int main(int argc, char **argv) {
     const char *scheme = h2_scheme(job.req_step_msg[i]);
     const char *authority = h2_authority(job.req_step_msg[i]);
     int j;
-    for (j = 0; j < cli_sess_num; j++) {
-      if (!strcmp(scheme, cli_sess[j].scheme) &&
-          !strcmp(authority, cli_sess[j].authority)) {
-        job.req_step_sess[i] = cli_sess[j].sess;
+    for (j = 0; j < svr_peer_num; j++) {
+      if (!strcmp(scheme, svr_peers[j].scheme) &&
+          !strcmp(authority, svr_peers[j].authority)) {
+        job.req_step_peer[i] = svr_peers[j].peer;
         break;
       }
     }
-    if (j >= cli_sess_num) {
-      /* no match; create new session */
-      if (cli_sess_num >= CLI_SESS_MAX) {
-        fprintf(stderr, "too many client sessions: max=%d\n", CLI_SESS_MAX);
+    if (j == svr_peer_num) {
+      /* no match; create new peer and connect to server */
+      if (svr_peer_num >= SVR_PEER_MAX) {
+        fprintf(stderr, "too many server peers: max=%d\n", SVR_PEER_MAX);
         return EXIT_FAILURE;
       }
-      fprintf(stderr, "NEW SESS: %s://%s\n", scheme, authority);
-      cli_sess[j].scheme = scheme;
-      cli_sess[j].authority = authority;
-      cli_sess[j].sess = h2_connect(ctx, authority,
-                               !strcasecmp(scheme, "https")? ssl_ctx : NULL,
-                               &settings,
-                               response_cb, push_promise_cb, push_response_cb,
-                               NULL/*static user data*/, &job);
-      job.req_step_sess[i] = cli_sess[j].sess;
-      if (cli_sess[j].sess == NULL) {
+      fprintf(stderr, "NEW SERVER PEER: %s://%s\n", scheme, authority);
+      svr_peers[j].scheme = scheme;
+      svr_peers[j].authority = authority;
+      svr_peers[j].peer = h2_peer_connect(sess_per_svr, req_thr_for_reconn,
+                              ctx, authority,
+                              !strcasecmp(scheme, "https")? ssl_ctx : NULL,
+                              &settings,
+                              response_cb, push_promise_cb, push_response_cb,
+                              NULL/* job is static */, &job);
+      if (svr_peers[j].peer == NULL) {
+        fprintf(stderr, "connect failed to server: %s\n", authority);
         return EXIT_FAILURE;
       }
-      cli_sess_num++;
+      job.req_step_peer[i] = svr_peers[j].peer;
+      svr_peer_num++;
     }
   }
 
@@ -721,6 +733,9 @@ int main(int argc, char **argv) {
   }
 #endif
 
+  /* free parallel task table */
+  free(job.req_par_task);
+
   /* free client job */
   for (i = 0; i <= job.req_step_num && i < REQ_STEP_MAX; i++) {
     h2_msg_free(job.req_step_msg[i]);
@@ -731,9 +746,6 @@ int main(int argc, char **argv) {
     free(job.repl_sym[i].fmt);
     job.repl_sym[i].fmt = NULL;
   }
-
-  /* free parallel task table */
-  free(job.req_par_task);
 
   return 0;
 }

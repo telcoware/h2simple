@@ -34,6 +34,7 @@
 typedef struct h2_msg h2_msg;
 typedef struct h2_strm h2_strm;
 typedef struct h2_sess h2_sess;
+typedef struct h2_peer h2_peer;
 typedef struct h2_svr h2_svr;
 typedef struct h2_ctx h2_ctx;
 
@@ -148,15 +149,17 @@ void h2_settings_init(h2_settings *settingss);  /* must be call before set */
 
 /* to be called at session, stream, server socket is closed */
 /* for the user to free user_data */
-typedef void (*h2_sess_free_cb)(h2_sess *sess, void *sess_user_data);
 typedef void (*h2_strm_free_cb)(h2_strm *strm, void *strm_user_data);
+typedef void (*h2_sess_free_cb)(h2_sess *sess, void *sess_user_data);
+typedef void (*h2_peer_free_cb)(h2_peer *peer, void *peer_user_data);
 typedef void (*h2_svr_free_cb)(h2_svr *svr, void *svr_user_data);
 
 h2_ctx *h2_sess_ctx(h2_sess *sess);
 
-/* trigger to terminate session; session is destroyed later */
-int h2_sess_terminate(h2_sess *sess);
+int h2_sess_terminate(h2_sess *sess, int wait_rsp);
+  /* trigger to terminate session; session is destroyed later */
   /* returns: 0(terminated), 1(already terminated), <(error) */
+  /* wait_rsp=1 for client session to terminate after all remaining responses */
   /* NOTE: there might be more message receives after this call */
 
 
@@ -191,6 +194,47 @@ h2_sess *h2_connect(h2_ctx *ctx, const char *authority,
 int h2_send_request(h2_sess *sess, h2_msg *req,
                     h2_strm_free_cb strm_free_cb, void *strm_user_data);
 
+
+/* Client Side API Calls and Callbacks on Peer --------------------------- */
+/* NOTE: h2 peer is set of sessions to a server for client API */
+/*       witho auto house keeping of multiple sessions */
+
+/* client side callbacks */
+typedef int (*h2_peer_response_cb)(h2_peer *peer, h2_msg *rsp,
+                    void *peer_user_data, void *strm_user_data);
+  /* returns: 0(ok), 0<(error) */
+typedef int (*h2_peer_push_promise_cb)(
+                    h2_peer *peer, h2_msg *prm_req,
+                    void *peer_user_data, void *strm_user_data,
+                    h2_strm_free_cb *push_strm_free_cb_ret,
+                    void **push_strm_user_data_ret);
+  /* returns: 0(ok), <0(error; send RST_STREAM on push promise stream) */
+typedef int (*h2_peer_push_response_cb)(
+                    h2_peer *peer, h2_msg *prm_rsp,
+                    void *peer_user_data, void *push_strm_user_data);
+  /* returns: 0(ok), 0<(error) */
+
+/* client side context create api to start sessions */
+h2_peer *h2_peer_connect(int sess_num, int req_thr_for_reconn,
+                    h2_ctx *ctx, const char *authority,
+                    SSL_CTX *cli_ssl_ctx,
+                    h2_settings *settings,
+                    h2_peer_response_cb response_cb, 
+                    h2_peer_push_promise_cb push_promise_cb,
+                    h2_peer_push_response_cb push_response_cb,
+                    h2_peer_free_cb peer_free_cb, void *peer_user_data);
+  /* NOTE: cli_ssl_ctx MUST be valid in h2_peer entry lifetime */
+  /* cli_ssl_ctx, settings might be null */
+  /* req_thr_for_reconn 0 for unlimited; overided to 0 on sess_num=1 */
+
+/* h2 client application api for request on peer with sess load balancing */
+int h2_peer_send_request(h2_peer *peer, h2_msg *req,
+                    h2_strm_free_cb strm_free_cb, void *strm_user_data);
+
+/* terminate all sessions on the peer */
+int h2_peer_terminate(h2_peer *peer, int wait_rsp);
+  /* wait_rsp=1 for client session to terminate after all remaining responses */
+ 
 
 /* Server Session API Calls and Callbacks -------------------------------- */
 

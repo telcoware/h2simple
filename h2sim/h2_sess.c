@@ -50,6 +50,7 @@
 h2_cls h2_cls_cls  = { { NULL }, "h2_cls_cls"  };
 h2_cls h2_cls_strm = { { &h2_cls_cls }, "h2_cls_strm" };
 h2_cls h2_cls_sess = { { &h2_cls_cls }, "h2_cls_sess" };
+h2_cls h2_cls_peer = { { &h2_cls_cls }, "h2_cls_peer" };
 h2_cls h2_cls_svr  = { { &h2_cls_cls }, "h2_cls_svr"  };
 h2_cls h2_cls_ctx  = { { &h2_cls_cls }, "h2_cls_ctx"  };
 
@@ -200,7 +201,13 @@ static ssize_t ng_send_msg_body_cb(nghttp2_session *ng_sess,
   rb->data_used += n;
   if (rb->data_used >= rb->data_size) {
     *data_flags |= NGHTTP2_DATA_FLAG_EOF;
+  } else {
+    //fprintf(stderr, "DEBUG: %s[%d] REMAINS DATA: %d sess.send_data_remain=%d\n",
+    //        sess->log_prefix, stream_id, rb->data_size - rb->data_used,
+    //        sess->send_data_remain);
   }
+
+  sess->send_data_remain -= n;
   return n;
 }
 
@@ -228,6 +235,11 @@ int h2_send_request(h2_sess *sess, h2_msg *req,
   int ng_hdr_num = 0;
   int stream_id, i;
   char s[1][32];
+
+  if (sess->is_terminated) {
+    warnx("%scannot send request for sess is terminated\n", sess->log_prefix);
+    return -1;
+  }
 
   ng_hdr_append(ng_hdr, &ng_hdr_num, REQ_HDR_MAX, ":method", h2_method(req));
   ng_hdr_append(ng_hdr, &ng_hdr_num, REQ_HDR_MAX, ":scheme", h2_scheme(req));
@@ -262,9 +274,13 @@ int h2_send_request(h2_sess *sess, h2_msg *req,
   if (stream_id < 0) {
     warnx("%sCannot not submit HTTP request: %s",
           sess->log_prefix, nghttp2_strerror(stream_id));
+    h2_strm_free(strm);
     return -2;
   }
+  strm->is_req = 1;
   strm->stream_id = stream_id;
+  sess->send_data_remain += strm->send_body_rb.data_size;
+  sess->req_cnt++;
 
   if (sess->ctx->verbose) {
     fprintf(stderr, "%s[%d] REQUEST HEADER:\n",
@@ -272,6 +288,8 @@ int h2_send_request(h2_sess *sess, h2_msg *req,
     ng_print_headers(stderr, ng_hdr, ng_hdr_num, sess->log_prefix, stream_id);
   }
 
+  //h2_sess_mark_send_pending(sess);
+  h2_sess_send(sess);
   return 0;
 }
 
@@ -303,6 +321,7 @@ int h2_send_response(h2_sess *sess, h2_strm *strm, h2_msg *rsp) {
 
   /* mark response sent to prevent further push_promise */
   strm->response_sent = 1;
+  sess->send_data_remain += strm->send_body_rb.data_size;
 
   r = nghttp2_submit_response(sess->ng_sess, strm->stream_id,
                                ng_hdr, ng_hdr_num, data_prd);
@@ -320,11 +339,14 @@ int h2_send_response(h2_sess *sess, h2_strm *strm, h2_msg *rsp) {
                      sess->log_prefix, strm->stream_id);
   }
 
+  //h2_sess_mark_send_pending(sess);
+  h2_sess_send(sess);
   return 0;
 }
 
 int h2_send_response_simple(h2_sess *sess, h2_strm *strm, h2_msg *ref_req,
-                            int status, const char *content_type, void *body, int body_len) {
+                            int status, const char *content_type,
+                            void *body, int body_len) {
   /* use temporary static message */
   h2_msg rsp;
   h2_msg_init_static(&rsp);
@@ -446,6 +468,14 @@ static int h2_on_response_recv(h2_sess *sess, h2_strm *strm) {
     if (ret < 0) {
       warnx("%s[%d] response_cb failed; go ahead: ret=%d",
             sess->log_prefix, strm->stream_id, ret);
+    }
+  }
+  if (strm->is_req) {
+    sess->rsp_cnt++;
+    if (sess->is_terminated == 2 && 
+        sess->req_cnt == sess->rsp_cnt &&
+        sess->send_data_remain <= 0) {
+      h2_sess_terminate(sess, 0);
     }
   }
   return 0;
@@ -744,11 +774,11 @@ static int ng_strm_close_cb(nghttp2_session *ng_sess, int32_t stream_id,
     return 0;
   }
 
-  sess->stream_close_cnt++;
+  sess->strm_close_cnt++;
+  sess->send_data_remain -=
+    (strm->send_body_rb.data_size - strm->send_body_rb.data_used);
   h2_strm_free(strm);
   nghttp2_session_set_stream_user_data(ng_sess, stream_id, NULL);
-
-  // HERE: TODO: here MAY comes the application logic to free user_data
 
   return 0;
 }
@@ -807,16 +837,31 @@ void h2_sess_free(h2_sess *sess) {
      ((sess->tv_end.tv_sec - sess->tv_begin.tv_sec) * 1.0 +
       (sess->tv_end.tv_usec - sess->tv_begin.tv_usec) * 0.000001);
 
-  fprintf(stderr, "%sDISCONNECTED%s%s: %.0f tps (%5f secs for %d streams)\n",
-          sess->log_prefix,
-          (sess->close_reason)? " by " : "",
-          (sess->close_reason)? h2_sess_close_reason_str(sess) : "",
-          sess->stream_close_cnt / elapsed,
-          elapsed, sess->stream_close_cnt);
+  if (sess->is_server) {
+    fprintf(stderr, "%sDISCONNECTED%s%s: %.0f tps (%.3f secs for %d streams)\n",
+            sess->log_prefix,
+            (sess->close_reason)? " by " : "",
+            (sess->close_reason)? h2_sess_close_reason_str(sess) : "",
+            sess->strm_close_cnt / elapsed, elapsed, sess->strm_close_cnt);
+  } else {
+    fprintf(stderr, "%sDISCONNECTED%s%s: %.0f tps (%.3f secs for "
+            "%d reqs %d rsps %d streams)%s\n",
+            sess->log_prefix,
+            (sess->close_reason)? " by " : "",
+            (sess->close_reason)? h2_sess_close_reason_str(sess) : "",
+            sess->strm_close_cnt / elapsed, elapsed,
+            sess->req_cnt, sess->rsp_cnt, sess->strm_close_cnt,
+            (sess->req_cnt != sess->rsp_cnt)? " !!!" : "");
+  }
 
   if (sess->fd >= 0) {
 #ifdef EPOLL_MODE
     epoll_ctl(sess->ctx->epoll_fd, EPOLL_CTL_DEL, sess->fd, NULL);
+    if (epoll_ctl(sess->ctx->epoll_fd, EPOLL_CTL_DEL, sess->fd, NULL) < 0) {
+      /* for linux <= 2.9.0 */
+      struct epoll_event e = { 0 };
+      epoll_ctl(sess->ctx->epoll_fd, EPOLL_CTL_DEL, sess->fd, &e);
+    }
 #endif
     /* NOTE: close() SHOULD be called event when shutdown() is called */
     shutdown(sess->fd, SHUT_RDWR);
@@ -826,10 +871,20 @@ void h2_sess_free(h2_sess *sess) {
   nghttp2_session_del(sess->ng_sess);
   sess->ng_sess = NULL;
 
+#ifdef TLS_MODE
+  if (sess->ssl) {
+    SSL_shutdown(sess->ssl);
+    SSL_free(sess->ssl);
+    sess->ssl = NULL;
+  }
+#endif
+
   /* free streams */
   h2_strm *strm = sess->strm_list_head.next;
   while (strm) {
     h2_strm *next = strm->next;
+    sess->send_data_remain -=
+      (strm->send_body_rb.data_size - strm->send_body_rb.data_used);
     h2_strm_free(strm);
     strm = next;
   }
@@ -841,13 +896,10 @@ void h2_sess_free(h2_sess *sess) {
     sess->user_data = NULL;
   }
 
-#ifdef TLS_MODE
-  if (sess->ssl) {
-    SSL_shutdown(sess->ssl);
-    SSL_free(sess->ssl);
-    sess->ssl = NULL;
+  if (sess->send_data_remain) {
+    warnx("%sSESS FREE BUT SEND_DATA REMAINS: %d\n",
+           sess->log_prefix, sess->send_data_remain);
   }
-#endif
 
   /* delete from ctx sess list */
   sess->prev->next = sess->next;
@@ -866,24 +918,5 @@ void h2_sess_free(h2_sess *sess) {
 
 h2_ctx *h2_sess_ctx(h2_sess *sess) {
   return (sess)? sess->ctx : NULL;
-}
-
-int h2_sess_terminate(h2_sess *sess) {
-  if (sess->is_terminated) {
-    return 1;  /* already terminated */
-  } 
-
-  int ret;
-  if ((ret = nghttp2_session_terminate_session(sess->ng_sess,
-                                               NGHTTP2_NO_ERROR)) < 0) {
-    warnx("%snghttp2_session_terminate_session() failed: ret=%d",
-          sess->log_prefix, ret);
-    return -1;
-  }
-  if (sess->ctx->verbose) {
-    warnx("%sTERMINATE SESSION", sess->log_prefix);
-  }
-  sess->is_terminated = 1;
-  return 0;
 }
 

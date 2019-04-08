@@ -182,7 +182,7 @@ static void h2_set_close_exec(int fd) {
  */
 
 
-inline void h2_sess_mark_send_pending(h2_sess *sess) {
+void h2_sess_mark_send_pending(h2_sess *sess) {
   if (!sess->send_pending) {
 #ifdef EPOLL_MODE
     struct epoll_event e;
@@ -198,7 +198,7 @@ inline void h2_sess_clear_send_pending(h2_sess *sess) {
   if (sess->send_pending) {
 #ifdef EPOLL_MODE
     struct epoll_event e;
-    e.events = EPOLLIN | EPOLLOUT;
+    e.events = EPOLLIN;
     e.data.ptr = &sess->obj;
     epoll_ctl(sess->fd, EPOLL_CTL_MOD, sess->fd, &e);
 #endif
@@ -215,6 +215,7 @@ static int h2_sess_send_once(h2_sess *sess) {
   int sent, total_sent = 0;
 #ifdef TLS_MODE
   SSL *ssl = sess->ssl;
+  int r;
 #endif
 #ifdef EPOLL_MODE
   int mem_send_zero = 0;
@@ -260,22 +261,25 @@ static int h2_sess_send_once(h2_sess *sess) {
     }
   }
 
-  /* DEBUG: to check merge_size and mem_send size */
-  /* fprintf(stderr, "%d+%d ", merge_size, (int)mem_send_size); */
+  /* HERE: DEBUG: to check merge_size and mem_send size */
+  //fprintf(stderr, "%d+%d ", wb->merge_size, wb->mem_send_size);
 
   /* try to send merge_data once */
   if (wb->merge_size > 0) {
 #ifdef TLS_MODE
     if (ssl) {
-      sent = SSL_write(ssl, wb->merge_data, wb->merge_size);
-      if (sent <= 0) {
-        if (SSL_get_error(ssl, sent) == SSL_ERROR_WANT_WRITE) {
+      r = SSL_write(ssl, wb->merge_data, wb->merge_size);
+      if (r > 0) {
+        sent = wb->merge_size;
+      } else {  /* r <= 0 */
+        if (SSL_get_error(ssl, r) == SSL_ERROR_WANT_WRITE) {
           fprintf(stderr, "DEBUG: TLS SEND merge_data WOULD BLOCK: "
                   "to_send=%d\n", (int)wb->merge_size);
+          /* NOTE: should be repeated with same buf, and size */
           h2_sess_mark_send_pending(sess);
           return total_sent;  /* retry later */
         }
-        warnx("SSL_write(merge_data) error: %d", SSL_get_error(ssl, sent));
+        warnx("SSL_write(merge_data) error: %d", SSL_get_error(ssl, r));
         sess->close_reason = CLOSE_BY_SSL_ERR;
         return -2;
       }
@@ -307,6 +311,7 @@ static int h2_sess_send_once(h2_sess *sess) {
 
       memmove(wb->merge_data, &wb->merge_data[sent], wb->merge_size - sent);
       wb->merge_size -= sent;
+      h2_sess_mark_send_pending(sess);
       return total_sent;  /* possible block at send */
     } else {
       wb->merge_size = 0;
@@ -317,15 +322,18 @@ static int h2_sess_send_once(h2_sess *sess) {
   if (wb->mem_send_size) {
 #ifdef TLS_MODE
     if (ssl) {
-      sent = SSL_write(ssl, wb->mem_send_data, wb->mem_send_size);
-      if (sent <= 0) {
-        if (SSL_get_error(ssl, sent) == SSL_ERROR_WANT_WRITE) {
+      r = SSL_write(ssl, wb->mem_send_data, wb->mem_send_size);
+      if (r > 0) {
+        sent = wb->mem_send_size;
+      } else {  /* r <= 0 */
+        if (SSL_get_error(ssl, r) == SSL_ERROR_WANT_WRITE) {
           fprintf(stderr, "DEBUG: TLS SEND mem_send_data WOULD BLOCK: "
                   "to_send=%d\n", (int)wb->mem_send_size);
+          /* NOTE: should be repeated with same buf, and size */
           h2_sess_mark_send_pending(sess);
           return total_sent;  /* retry later */
         }
-        warnx("SSL_write(mem_send_data) error: %d", SSL_get_error(ssl, sent));
+        warnx("SSL_write(mem_send_data) error: %d", SSL_get_error(ssl, r));
         sess->close_reason = CLOSE_BY_SSL_ERR;
         return -2;
       }
@@ -357,6 +365,7 @@ static int h2_sess_send_once(h2_sess *sess) {
 
       wb->mem_send_data += sent;
       wb->mem_send_size -= sent;
+      h2_sess_mark_send_pending(sess);
       return total_sent;  /* possible block at send */
     } else {
       wb->mem_send_data = NULL;
@@ -374,7 +383,7 @@ static int h2_sess_send_once(h2_sess *sess) {
     */
   }
 
-#if EPOLL_MODE
+#ifdef EPOLL_MODE
   if (mem_send_zero && !nghttp2_session_want_read(sess->ng_sess)) {
     sess->close_reason = CLOSE_BY_NGHTTP2_END;
     return -6;
@@ -384,7 +393,7 @@ static int h2_sess_send_once(h2_sess *sess) {
   return total_sent;
 }
 
-static int h2_sess_send(h2_sess *sess) {
+int h2_sess_send(h2_sess *sess) {
   int r;
   do {
     r = h2_sess_send_once(sess);
@@ -458,6 +467,7 @@ void h2_settings_init(h2_settings *settings) {
 static int h2_sess_send_settings(h2_sess *sess, h2_settings *settings) {
   nghttp2_settings_entry iv[16];
   int r, iv_num = 0;
+
   if (settings) {
     if (settings->header_table_size >= 0) {
       iv[iv_num].settings_id = NGHTTP2_SETTINGS_HEADER_TABLE_SIZE;
@@ -499,12 +509,56 @@ static int h2_sess_send_settings(h2_sess *sess, h2_settings *settings) {
 
 
 /*
+ * Session Common ----------------------------------------------------------
+ */
+
+int h2_sess_terminate(h2_sess *sess, int wait_rsp) {
+
+  if (sess == NULL || sess->is_terminated == 1) {
+    return 1;  /* already terminated */
+  }
+
+  if (wait_rsp && !sess->is_server && sess->req_cnt > sess->rsp_cnt) {
+    if (sess->ctx->verbose) {
+      warnx("%sTERMINATE SESSION WAIT RESPONSE", sess->log_prefix);
+    }
+    sess->is_terminated = 2/* wait_rsp */;
+    /* NOTE: submit goways seems not working well */
+    /*       just wait untl all response recevied */
+#if 0
+    int n = nghttp2_session_get_next_stream_id(sess->ng_sess) - 1;
+    int r = nghttp2_submit_goaway(sess->ng_sess, NGHTTP2_FLAG_NONE,
+                              n, NGHTTP2_NO_ERROR, NULL, 0);
+    if (r < 0) {
+      warnx("%snghttp2_submit_goway() failed: last_stream_id=%d ret=%d", 
+            sess->log_prefix, n, r);
+      return -1;
+    }
+#endif
+  } else {
+    if (sess->ctx->verbose) {
+      warnx("%sTERMINATE SESSION IMMEDIATE", sess->log_prefix);
+    }
+    sess->is_terminated = 1/* immediate */;
+    int r = nghttp2_session_terminate_session(sess->ng_sess, NGHTTP2_NO_ERROR);
+    if (r < 0) {
+      warnx("%snghttp2_session_terminate_session() failed: ret=%d",
+            sess->log_prefix, r);
+      return -1;
+    }
+    h2_sess_send(sess);  /* NOTE: no h2_sess_free() by error return case */
+  }
+
+  return 0;
+}
+
+
+/*
  * Client Session I/O ------------------------------------------------------
  */
 
 static h2_sess *h2_sess_init_client(h2_ctx *ctx, SSL *ssl,
                                     int fd, const char *authority) {
-
   h2_sess *sess = calloc(1, sizeof(h2_sess));
   sess->obj.cls = &h2_cls_sess;
 
@@ -702,6 +756,7 @@ h2_sess *h2_connect(h2_ctx *ctx, const char *authority, SSL_CTX *cli_ssl_ctx,
   sess->user_data = sess_user_data;
 
   h2_set_nonblock(sess->fd);
+
   return sess;
 }
 
@@ -710,8 +765,7 @@ h2_sess *h2_connect(h2_ctx *ctx, const char *authority, SSL_CTX *cli_ssl_ctx,
  * Server Session I/O ------------------------------------------------------
  */
 
-static int h2_sess_server_tcp_start(h2_sess *sess, h2_settings *settings)
-{
+static int h2_sess_server_tcp_start(h2_sess *sess, h2_settings *settings) {
   h2_sess_nghttp2_init(sess);
 
   if (h2_sess_send_settings(sess, settings) < 0) {
@@ -724,8 +778,7 @@ static int h2_sess_server_tcp_start(h2_sess *sess, h2_settings *settings)
 
 
 #ifdef TLS_MODE
-static int h2_sess_server_tls_start(h2_sess *sess, h2_settings *settings)
-{
+static int h2_sess_server_tls_start(h2_sess *sess, h2_settings *settings) {
   const unsigned char *alpn = NULL;
   unsigned int alpnlen = 0;
   SSL *ssl = sess->ssl;
@@ -787,6 +840,9 @@ static h2_sess *h2_sess_init_server(h2_ctx *ctx, h2_svr *svr, int fd,
   setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &v, sizeof(v));
   sess->fd = fd;
 
+  h2_settings sess_settings;
+  h2_settings_init(&sess_settings);
+
 #ifdef EPOLL_MODE
   struct epoll_event e;
   e.events = EPOLLIN;
@@ -800,8 +856,6 @@ static h2_sess *h2_sess_init_server(h2_ctx *ctx, h2_svr *svr, int fd,
 
   /* call user accept callback */
   SSL_CTX *sess_ssl_ctx = NULL;
-  h2_settings sess_settings;
-  h2_settings_init(&sess_settings);
   if (svr->accept_cb) {
     int r = svr->accept_cb(svr, svr->user_data, host, port,
                            &sess_ssl_ctx, &sess_settings,
@@ -846,6 +900,7 @@ static h2_sess *h2_sess_init_server(h2_ctx *ctx, h2_svr *svr, int fd,
   }
 
   h2_set_nonblock(sess->fd);
+
   return sess;
 }
 
@@ -1005,19 +1060,18 @@ h2_ctx *h2_ctx_init(int verbose) {
 }
 
 void h2_ctx_free(h2_ctx *ctx) {
+  ctx->service_flag = 0;
 
-  h2_svr *svr = ctx->svr_list_head.next;
-  while (svr) {
-    h2_svr *next = svr->next;
-    h2_svr_free(svr);
-    svr = next;
+  while (ctx->svr_list_head.next) {
+    h2_svr_free(ctx->svr_list_head.next);
   }
 
-  h2_sess *sess = ctx->sess_list_head.next;
-  while (sess) {
-    h2_sess *next = sess->next;
-    h2_sess_free(sess);
-    sess = next;
+  while (ctx->peer_list_head.next) {
+    h2_peer_free(ctx->peer_list_head.next);
+  }
+
+  while (ctx->sess_list_head.next) {
+    h2_sess_free(ctx->sess_list_head.next);
   }
 
 #ifdef EPOLL_MODE
@@ -1079,7 +1133,8 @@ void h2_ctx_run(h2_ctx *ctx) {
 
     /* check for h2 sess/srv socket */
     struct epoll_event *e = ea;
-    for ( ; r > 0; r--, e++) {
+    int event_num;
+    for (event_num = r ; event_num > 0; event_num--, e++) {
       int events = e->events;
       if (((h2_obj *)e->data.ptr)->cls == &h2_cls_svr) {
         /* server acccept event */
@@ -1104,21 +1159,18 @@ void h2_ctx_run(h2_ctx *ctx) {
             continue;
           }
         }
-        if ((events & (EPOLLOUT | EPOLLIN))) {
+        if ((events & (EPOLLOUT || EPOLLIN))) {  /* always do send after recv */
           if (h2_sess_send(sess) < 0) {
             h2_sess_free(sess);
             continue;
           }
         }
-        if ((events & EPOLLRDHUP)) {
-          warnx("socket closed by peer");
-          sess->close_reason = CLOSE_BY_SOCK_EOF;
-          h2_sess_free(sess);
-          continue;
-        }
-        if ((events & (EPOLLERR | EPOLLHUP))) {
-          warnx("socket errored: epoll_events=0x%02x", events);
+        if ((events & (EPOLLERR | EPOLLHUP | EPOLLRDHUP))) {
           sess->close_reason = CLOSE_BY_SOCK_ERR;
+          if (!sess->is_terminated) {
+            warnx("socket errored: epoll_events=0x%02x sess=%s",
+                  events, sess->log_prefix);
+          }
           h2_sess_free(sess);
           continue;
         }
@@ -1166,7 +1218,7 @@ void h2_ctx_run(h2_ctx *ctx) {
       if (nghttp2_session_want_read(sess->ng_sess)) {
         pfd[n].events |= POLLIN;
       }
-      if (h2_wr_buf_pending(&sess->wr_buf) ||
+      if (sess->send_pending ||
           nghttp2_session_want_write(sess->ng_sess)) {
         pfd[n].events |= POLLOUT;
       }
@@ -1191,12 +1243,12 @@ void h2_ctx_run(h2_ctx *ctx) {
     }
 
     /* check for h2 sess/srv socket */
-    int i;
-    for (i = 0; i < n && r > 0; i++) {
+    int i, event_num = r;
+    for (i = 0; i < n && event_num > 0; i++) {
       if (pfd[i].revents == 0) {
         continue;
       }
-      r--;
+      event_num--;
       int revents = pfd[i].revents;
       if (pfd_obj[i]->cls == &h2_cls_svr) {
         /* server acccept event */
@@ -1221,7 +1273,7 @@ void h2_ctx_run(h2_ctx *ctx) {
             continue;
           }
         }
-        if ((revents & (POLLOUT | POLLIN))) {
+        if ((revents & (POLLOUT || POLLIN))) {  /* always do send after recv */
           if (h2_sess_send(sess) < 0) {
             h2_sess_free(sess);
             continue;
@@ -1248,4 +1300,292 @@ void h2_ctx_run(h2_ctx *ctx) {
 }
 
 #endif /* EPOLL_MODE */
+
+
+/*
+ * Client API Peer I/O -----------------------------------------------------
+ */
+
+/* forward declaration */
+static h2_sess *peer_connect_sess(h2_peer *peer, int sess_idx);
+
+static int peer_response_cb(h2_sess *sess, h2_msg *rsp,
+                    void *sess_user_data, void *strm_user_data) {
+  h2_peer *peer = sess_user_data;
+  (void)sess;
+
+  if (peer->response_cb) {
+    return peer->response_cb(peer, rsp, peer->user_data, strm_user_data);
+  }
+  return 0;
+}
+
+static int peer_push_promise_cb(h2_sess *sess, h2_msg *prm_req,
+                    void *sess_user_data, void *strm_user_data,
+                    h2_strm_free_cb *push_strm_free_cb_ret,
+                    void **push_strm_user_data_ret) {
+  h2_peer *peer = sess_user_data;
+  (void)sess;
+
+  if (peer->push_promise_cb) {
+    return peer->push_promise_cb(peer, prm_req, peer->user_data, strm_user_data,
+                                push_strm_free_cb_ret, push_strm_user_data_ret);
+  }
+  return 0;
+}
+
+static int peer_push_response_cb(h2_sess *sess, h2_msg *prm_rsp,
+                    void *sess_user_data, void *push_strm_user_data) {
+  h2_peer *peer = sess_user_data;
+  (void)sess;
+
+  if (peer->push_response_cb) {
+    return peer->push_response_cb(peer, prm_rsp, peer->user_data,
+                                  push_strm_user_data);
+  }
+  return 0;
+}
+
+static void peer_sess_free_cb(h2_sess *sess, void *sess_user_data) {
+  h2_peer *peer = sess_user_data;
+  int i;
+
+  for (i = 0; i < peer->sess_num; i++) {
+    if (peer->sess[i] == sess) {
+      break;
+    }
+  }
+  if (i >= peer->sess_num) {
+    warnx("peer_sess_free_cb:: unknown session for peer: peer=%s sess=%s",
+          peer->authority, sess->log_prefix);
+    return;
+  }
+  /* now, peer->sess[i] is known to be freed */
+
+  /* gather stat from sess */
+  peer->req_cnt += sess->req_cnt;
+  peer->rsp_cnt += sess->rsp_cnt;
+  peer->strm_close_cnt += sess->strm_close_cnt;
+  peer->sess_close_cnt++;
+
+  peer->sess[i] = NULL; 
+  if (peer->act_sess[i]) {
+    peer->act_sess[i] = 0;
+    peer->act_sess_num--;
+  }
+
+  /* try reconnect is peer or ctx is not termiating */
+  if (!peer->is_terminated && peer->ctx->service_flag) {
+    peer_connect_sess(peer, i);
+  }
+}
+
+static h2_sess *peer_connect_sess(h2_peer *peer, int sess_idx) {
+  h2_sess *sess = h2_connect(peer->ctx, peer->authority, peer->ssl_ctx,
+                             &peer->settings,
+                             peer_response_cb,
+                             peer_push_promise_cb, peer_push_response_cb,
+                             peer_sess_free_cb, peer);
+  if (sess) {
+    peer->sess[sess_idx] = sess;
+    if (!peer->act_sess[sess_idx]) {
+      /* init peers sess status */
+      peer->act_sess[sess_idx] = 1;
+      peer->act_sess_num++;
+    }
+  }
+  return sess;
+}
+
+/* client side context create api to start sessions */
+h2_peer *h2_peer_connect(int sess_num, int req_thr_for_reconn,
+                    h2_ctx *ctx, const char *authority,
+                    SSL_CTX *cli_ssl_ctx,
+                    h2_settings *settings,
+                    h2_peer_response_cb response_cb,
+                    h2_peer_push_promise_cb push_promise_cb,
+                    h2_peer_push_response_cb push_response_cb,
+                    h2_peer_free_cb peer_free_cb, void *peer_user_data) {
+  h2_peer *peer;
+
+  if (req_thr_for_reconn != 0 && sess_num == 1) {
+    req_thr_for_reconn = 0;
+    warnx("h2_peer_connect:: ignore req_thr_for_reconn for sess_num=1: "
+          "authority=%s", authority);
+  }
+
+  peer = calloc(1, sizeof(*peer)); 
+  peer->obj.cls = &h2_cls_peer;
+
+  /* add to ctx peer list */
+  peer->next = ctx->peer_list_head.next;
+  ctx->peer_list_head.next = peer;
+  peer->prev = &ctx->peer_list_head;
+  if (peer->next) {
+    peer->next->prev = peer; }
+  ctx->peer_num++;
+  peer->ctx = ctx;
+
+  peer->sess_num = sess_num;
+  peer->req_thr_for_reconn = req_thr_for_reconn;
+
+  peer->authority = strdup(authority);
+  peer->ssl_ctx = cli_ssl_ctx;
+  if (settings) {
+    peer->settings = *settings;
+  } else {
+    h2_settings_init(&peer->settings);
+  }
+
+  peer->sess = calloc(sess_num, sizeof(*peer->sess));
+  peer->next_sess_idx = 0;
+  peer->act_sess = calloc(sess_num, sizeof(*peer->act_sess));
+  peer->act_sess_num = 0;
+
+  /* mark start time */
+  peer->sess_close_cnt = 0;
+  peer->strm_close_cnt = 0;
+  gettimeofday(&peer->tv_begin, NULL);
+
+  /* connect to peer as sess_num sessions */
+  int i;
+  for (i = 0; i < sess_num; i++) {
+    peer_connect_sess(peer, i);
+  }
+  if (peer->act_sess_num <= 0) {
+    warnx("cannot connect to peer: %s", authority);
+    h2_peer_free(peer);
+    return NULL;
+  }
+
+  /* lazy callbacks assigned for no callback on intial connect failure cases */
+  peer->response_cb = response_cb;
+  peer->push_promise_cb = push_promise_cb;
+  peer->push_response_cb = push_response_cb;
+  peer->peer_free_cb = peer_free_cb;
+  peer->user_data = peer_user_data;
+
+  return peer;
+}
+
+void h2_peer_free(h2_peer *peer) {
+  int i;
+
+  /* free all sessions */
+  for (i = 0; i < peer->sess_num; i++) {
+    if (peer->sess[i]) {
+      h2_sess_free(peer->sess[i]);
+      peer->sess[i] = NULL;
+    }
+  }
+
+  /* free user data */
+  if (peer->peer_free_cb) {
+    peer->peer_free_cb(peer, peer->user_data);
+    peer->peer_free_cb = NULL;
+    peer->user_data = NULL;
+  }
+
+  /* delete from ctx sess list */
+  peer->prev->next = peer->next;
+  if (peer->next) {
+    peer->next->prev = peer->prev;
+  }
+  peer->ctx->peer_num--;
+  peer->ctx = NULL;
+
+  peer->ssl_ctx = NULL;
+
+  /* show performance */
+  gettimeofday(&peer->tv_end, NULL);
+  double elapsed =
+     ((peer->tv_end.tv_sec - peer->tv_begin.tv_sec) * 1.0 +
+      (peer->tv_end.tv_usec - peer->tv_begin.tv_usec) * 0.000001);
+  if (peer->sess_num > 1) {
+    fprintf(stderr, "PEER CLOSED %s: %.0f tps (%.3f secs for "
+            "%d reqs %d rsps %d streams in %d sessions)%s\n",
+            peer->authority, peer->strm_close_cnt / elapsed,
+            elapsed, peer->req_cnt, peer->rsp_cnt,
+            peer->strm_close_cnt, peer->sess_close_cnt,
+            (peer->req_cnt != peer->rsp_cnt)? " !!!" : "");
+  }
+
+  free(peer->authority);
+  free(peer->sess);
+  free(peer->act_sess);
+  free(peer);
+}
+
+/* h2 client application api for request on peer with sess load balancing */
+int h2_peer_send_request(h2_peer *peer, h2_msg *req,
+                    h2_strm_free_cb strm_free_cb, void *strm_user_data) {
+  h2_sess *sess = NULL;
+  int i, r, n = peer->sess_num, nsi = peer->next_sess_idx;
+
+  if (peer->is_terminated) {
+    warnx("cannot send request for peer is terminated: %s\n", peer->authority);
+    return -1;
+  }
+
+  /* find active session with round-robin load balancing */
+  for (i = 0; i < n; i++) {
+    int si = (nsi + i) % n;
+    if ((sess = peer->sess[si]) && peer->act_sess[si])  {
+      /* house keep for to-be-terminated */
+      if (peer->req_thr_for_reconn > 0 &&
+          sess->req_cnt >= peer->req_thr_for_reconn &&
+          peer->act_sess_num >= peer->sess_num) {
+        /* terminate for too may requests handled */
+        if (peer->act_sess[si]) {  /* update before sess terminate call */
+          peer->act_sess[si] = 0;
+          peer->act_sess_num--;
+        }
+        h2_sess_terminate(sess, 1/* wait_rsp */);
+        sess = NULL;  /* try other sess */
+      } else {
+        /* use this session */
+        break;
+      }
+    }
+  }
+  peer->next_sess_idx = (nsi + i + 1) % n;  /* advances even no valid sess */
+
+  if (sess == NULL) {
+    /* TODO: try to connect server */
+  }
+
+  if (sess) {
+    r = h2_send_request(sess, req, strm_free_cb, strm_user_data);
+  } else {
+    warnx("no session available to peer: %s", peer->authority);
+    r = -1;
+  }
+
+  /* try to house keep till act_sess_num */
+  if (sess && peer->act_sess_num < peer->sess_num) {
+    /* TODO: try to connect server */ 
+  }
+
+  return r;
+}
+
+/* terminalte all sessions on the peer */
+int h2_peer_terminate(h2_peer *peer, int wait_rsp) {
+  int i;
+
+  if (peer == NULL || peer->is_terminated == 1) {
+    return 1;
+  }
+
+  peer->is_terminated = (wait_rsp)? 2 : 1;  /* 1:immediate, 2:wait_rsp */
+
+  for (i = 0; i < peer->sess_num; i++) {
+    if (peer->act_sess[i]) {
+      peer->act_sess[i] = 0;
+      peer->act_sess_num--;
+    }
+    h2_sess_terminate(peer->sess[i], wait_rsp);  /* go ahread even on error */
+  }
+  return 0;
+}
 
