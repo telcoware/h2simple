@@ -426,7 +426,7 @@ static void help(char *prog) {
 #endif
   fprintf(stderr, "  -H <settings_id>=<value>   # set http2 settings value\n");
   fprintf(stderr, "     # <settings_id> := header_table_size | enable_push |\n");
-  fprintf(stderr, "     #   max_concurent_stream, initial_window_size | max_frame_size\n");
+  fprintf(stderr, "     #   max_concurrent_streams, initial_window_size | max_frame_size\n");
   fprintf(stderr, "     #   max_header_list_size, enable_connect_protocol\n");
   fprintf(stderr, "  -Q                    # h2sim io quiet mode\n");
   fprintf(stderr, "  -q                    # all quiet mode\n");
