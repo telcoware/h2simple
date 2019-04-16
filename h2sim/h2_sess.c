@@ -339,8 +339,7 @@ int h2_send_response(h2_sess *sess, h2_strm *strm, h2_msg *rsp) {
                      sess->log_prefix, strm->stream_id);
   }
 
-  //h2_sess_mark_send_pending(sess);
-  h2_sess_send(sess);
+  h2_sess_mark_send_pending(sess);
   return 0;
 }
 

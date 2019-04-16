@@ -181,7 +181,6 @@ static void h2_set_close_exec(int fd) {
  * - tcp MTU: 1360 or less; cf. some public CPs site has MTU 1360
  */
 
-
 void h2_sess_mark_send_pending(h2_sess *sess) {
   if (!sess->send_pending) {
 #ifdef EPOLL_MODE
@@ -224,7 +223,7 @@ static int h2_sess_send_once(h2_sess *sess) {
   /* NOTE: send is always blocking */
   /* TODO: save and retry to send on last to_send data */
 
-  if (wb->merge_size > 0 && wb->mem_send_size > 0) {
+  if (wb->merge_size > 0 || wb->mem_send_size > 0) {
     warnx("### DEBUG: REENTRY WITH REMAINING WRITE: "
           "merge_size=%d mem_send_size=%d", wb->merge_size, wb->mem_send_size);
   }
@@ -1218,8 +1217,7 @@ void h2_ctx_run(h2_ctx *ctx) {
       if (nghttp2_session_want_read(sess->ng_sess)) {
         pfd[n].events |= POLLIN;
       }
-      if (sess->send_pending ||
-          nghttp2_session_want_write(sess->ng_sess)) {
+      if (sess->send_pending || nghttp2_session_want_write(sess->ng_sess)) {
         pfd[n].events |= POLLOUT;
       }
       if (pfd[n].events == 0) {
