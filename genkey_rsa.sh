@@ -3,8 +3,8 @@
 # Usage: genkey_rsa.sh [key_file [cert_file]]
 
 # files to be generated
-KEY=${1:-eckey.pem}
-CERT=${2:-eccert.pem}
+KEY=${1:-rsakey.pem}
+CERT=${2:-rsacert.pem}
 
 
 # create key
