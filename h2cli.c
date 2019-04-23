@@ -346,7 +346,8 @@ static int response_cb(h2_peer *peer, h2_msg *rsp, void *peer_user_data,
     req_task->req_step = 0;
     req_task->prm_num = 0;
   } else {
-    if (job->rsp_num >= job->req_max * job->req_step_num) {
+    if (job->rsp_num >= job->req_max * job->req_step_num &&
+        job->req_max >= 0 /* effective only when req_max is not zero */) {
       /* NOTE: all peers are closed at once */
       int i;
       for (i = 0; i < svr_peer_num; i++) {
@@ -415,7 +416,7 @@ static void help(char *prog) {
   fprintf(stderr, "    or %s [client_run_options] uri\n", prog);
   fprintf(stderr, "client_run_options:\n");
   fprintf(stderr, "  -P req_parallel       # default:1\n");
-  fprintf(stderr, "  -C req_max_count      # default:1\n");
+  fprintf(stderr, "  -C req_max_count      # default:1; 0 for idle conn\n");
   fprintf(stderr, "  -T req_tps            # request tps; 0 for unlimited; default:0\n");
   fprintf(stderr, "  -S sess_per_peer      # sessions per server: default:1\n");
   fprintf(stderr, "  -L req_thr_for_reconn # default:0(unlimited)\n");
@@ -523,10 +524,12 @@ int main(int argc, char **argv) {
       if (job.req_par <= 0)
         job.req_par = 1;
       break;
-    case 'C':  /* total request counts */
+    case 'C':  /* total request counts; 0 for no request and idle conn only */
       job.req_max = atoi(optarg);
-      if (job.req_max <= 0)
-        job.req_max = 1;
+      if (job.req_max < 0) {
+        fprintf(stderr, "invalid req_max; should be >= 0: %s\n", optarg);
+        return EXIT_FAILURE;
+      }
       break;
     case 'T':
       job.req_tps = atoi(optarg);
