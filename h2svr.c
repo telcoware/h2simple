@@ -202,6 +202,14 @@ void svr_free_cb(h2_svr *svr, void *svr_user_data) {
   }
 }
 
+#ifdef TLS_MODE
+int cli_cert_verify_pass_cb(int preverify_ok, X509_STORE_CTX *ctx) {
+  (void)preverify_ok;
+  (void)ctx;
+  return 1;  /* always ok regardless of preverify_ok */
+}
+#endif
+
 
 /*
  * Application main and runtime argument parsers ----------------------------
@@ -213,6 +221,8 @@ static void help(char *prog) {
 #ifdef TLS_MODE
   fprintf(stderr, "  -k key_file                # default:eckey.pem\n");
   fprintf(stderr, "  -c cert_file               # default:eccert.pem\n");
+  fprintf(stderr, "  -C verify|pass             # request client certificate\n");
+  fprintf(stderr, "     # and verify certificate or just pass anyway\n");
   fprintf(stderr, "  -S https://<ip>:<port>     # tls server listen ip:port\n");
 #endif
   fprintf(stderr, "  -S http://<ip>:<port>      # tcp server listen ip:port\n");
@@ -263,6 +273,8 @@ int main(int argc, char **argv) {
 #ifdef TLS_MODE
   char *key_file = "eckey.pem";    /* default private key file */
   char *cert_file = "eccert.pem";  /* default certificate file */
+  int request_cli_cert = 0;
+  int verify_cli_cert = 0;
 #endif
   char *authority = NULL;
   SSL_CTX *ssl_ctx = NULL;
@@ -288,7 +300,7 @@ int main(int argc, char **argv) {
   int c;
   int listen_num = 0;
   char scale;
-  while ((c = getopt(argc, argv, "k:c:S:H:Qqm:a:p:o:s:x:t:b:f:e:d:h")) >=  0) {
+  while ((c = getopt(argc, argv, "k:c:C:S:H:Qqm:a:p:o:s:x:t:b:f:e:d:h")) >=  0) {
     switch (c) {
 #ifdef TLS_MODE
     case 'k':
@@ -297,6 +309,12 @@ int main(int argc, char **argv) {
     case 'c':
       cert_file = optarg;
       break;
+    case 'C':
+      if (strcasecmp(optarg, "verify")) {
+        verify_cli_cert = 1;
+      } else if (strcasecmp(optarg, "pass")) {
+        verify_cli_cert = 0;
+      }
 #endif
     case 'S':
 #ifdef TLS_MODE
@@ -306,6 +324,18 @@ int main(int argc, char **argv) {
           fprintf(stderr, "cannot initialize ssl_ctx: "
                   "key_file=%s cert_file=%s\n", key_file, cert_file);
           return EXIT_FAILURE;
+        }
+        // to verify client certificate
+        if (request_cli_cert) {
+          if (verify_cli_cert) {
+            SSL_CTX_set_verify(ssl_ctx,
+                SSL_VERIFY_PEER | SSL_VERIFY_CLIENT_ONCE |
+                SSL_VERIFY_FAIL_IF_NO_PEER_CERT, NULL);
+          } else {
+            SSL_CTX_set_verify(ssl_ctx,
+                SSL_VERIFY_PEER | SSL_VERIFY_CLIENT_ONCE,
+                cli_cert_verify_pass_cb);
+          }
         }
       } else
 #endif
