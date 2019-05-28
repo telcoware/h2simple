@@ -577,17 +577,21 @@ static h2_sess *h2_sess_init_client(h2_ctx *ctx, SSL *ssl,
   sess->fd = fd;
 
   /* use local binding address for session log prefix */
-  struct sockaddr addr;
-  socklen_t addrlen = sizeof(addr);
-  if (getsockname(fd, &addr, &addrlen) == 0) {
+  struct sockaddr_in6 sa;  /* to allow ipv4 and ipv6 */
+  socklen_t salen = sizeof(sa);
+  if (getsockname(fd, (struct sockaddr *)&sa, &salen) == 0) {
     /* get log prefix info */
     char host[NI_MAXHOST], serv[NI_MAXSERV];
-    if (getnameinfo(&addr, addrlen, host, sizeof(host),
+    if (getnameinfo((struct sockaddr *)&sa, salen, host, sizeof(host),
                     serv, sizeof(serv), NI_NUMERICHOST | NI_NUMERICSERV)) {
       sess->log_prefix = strdup("(unknown)");
     } else {
-      char log_prefix[NI_MAXHOST + NI_MAXSERV + 1 + 1];
-      sprintf(log_prefix, "%s:%s ", host, serv);
+      char log_prefix[1 + NI_MAXHOST + 1 + 1 + NI_MAXSERV + 1];
+      if (((struct sockaddr *)&sa)->sa_family == AF_INET6) {
+         sprintf(log_prefix, "[%s]:%s ", host, serv);
+      } else {
+         sprintf(log_prefix, "%s:%s ", host, serv);
+      }
       sess->log_prefix = strdup(log_prefix);
     }
   } else {
@@ -699,8 +703,14 @@ h2_sess *h2_connect(h2_ctx *ctx, const char *authority, SSL_CTX *cli_ssl_ctx,
 
   /* get host and port from req[0].authority */
   char *port, *host = strdup(authority);
+  int n;
   if ((port = strrchr(host, ':'))) {
     *(port++) = '\0';  /* close host string and skip ':' */
+  }
+  if (host[0] == '[' && host[(n = strlen(host)) - 1] == ']' && n >= 3) {
+    /* '[ipv6_address]' case */
+    memmove(host, host + 1, n - 2);
+    host[n - 2] = '\0';
   }
   if (strlen(host) <= 0 || port == 0) {
     warnx("invalid first authority value; should be ip:port formatted: %s",
@@ -720,7 +730,8 @@ h2_sess *h2_connect(h2_ctx *ctx, const char *authority, SSL_CTX *cli_ssl_ctx,
 #endif
   hints.ai_protocol = 0;
   if (getaddrinfo(host, port, &hints, &res)) {
-    warnx("cannot resolve server address: %s", authority);
+    warnx("cannot resolve server address: %s: host='%s' port='%s'", authority,
+          host, port);
     free(host);
     return NULL;
   }
@@ -801,7 +812,7 @@ static int h2_sess_server_tls_start(h2_sess *sess, h2_settings *settings) {
 #endif
 
 static h2_sess *h2_sess_init_server(h2_ctx *ctx, h2_svr *svr, int fd, 
-                                    struct sockaddr *addr, socklen_t addrlen) {
+                                    struct sockaddr *sa, socklen_t salen) {
   /* NOTE: on error, fd is closed */
 
   h2_sess *sess = calloc(1, sizeof(h2_sess));
@@ -824,12 +835,16 @@ static h2_sess *h2_sess_init_server(h2_ctx *ctx, h2_svr *svr, int fd,
 
   /* get log prefix info */
   char host[NI_MAXHOST], serv[NI_MAXSERV];
-  if (getnameinfo(addr, addrlen, host, sizeof(host),
+  if (getnameinfo(sa, salen, host, sizeof(host),
                   serv, sizeof(serv), NI_NUMERICHOST | NI_NUMERICSERV)) {
     sess->log_prefix = strdup("(unknown)");
   } else {
-    char log_prefix[NI_MAXHOST + NI_MAXSERV + 1 + 1];
-    sprintf(log_prefix, "%s:%s ", host, serv);
+    char log_prefix[1 + NI_MAXHOST + 1 + 1 + NI_MAXSERV + 1];
+    if (sa->sa_family == AF_INET6) {
+       sprintf(log_prefix, "[%s]:%s ", host, serv);
+    } else {
+       sprintf(log_prefix, "%s:%s ", host, serv);
+    }
     sess->log_prefix = strdup(log_prefix);
   }
   unsigned short port = atoi(serv);
@@ -908,8 +923,14 @@ h2_svr *h2_listen(h2_ctx *ctx, const char *authority, SSL_CTX *svr_ssl_ctx,
                   h2_svr_free_cb svr_free_cb, void *svr_user_data) {
   /* get host and port from req[0].authority */
   char *port, *host = strdup(authority);
+  int n;
   if ((port = strrchr(host, ':'))) {
     *(port++) = '\0';  /* close host string and skip ':' */
+  }
+  if (host[0] == '[' && host[(n = strlen(host)) - 1] == ']' && n >= 3) {
+    /* '[ipv6_address]' case */
+    memmove(host, host + 1, n - 2);
+    host[n - 2] = '\0';
   }
   if (port == NULL) {
     warnx("invalid first authority value; should be ip:port formatted: %s",
@@ -1139,12 +1160,12 @@ void h2_ctx_run(h2_ctx *ctx) {
         /* server acccept event */
         h2_svr *svr = (void *)e->data.ptr;
         if ((events & EPOLLIN)) {
-          struct sockaddr sa;
+          struct sockaddr_in6 sa;  /* to allow ipv4 and ipv6 */
           socklen_t sa_len = sizeof(sa);  /* in/out argument */
-          int fd;
-          if ((fd = accept(svr->accept_fd, &sa, &sa_len)) >= 0) {
+          int fd = accept(svr->accept_fd, (struct sockaddr *)&sa, &sa_len);
+          if (fd >= 0) {
             h2_set_close_exec(fd);
-            h2_sess_init_server(ctx, svr, fd, &sa, sa_len);
+            h2_sess_init_server(ctx, svr, fd, (struct sockaddr *)&sa, sa_len);
           } else {
             warnx("accept() failed on server socket: %s", strerror(errno));
           }
@@ -1252,10 +1273,10 @@ void h2_ctx_run(h2_ctx *ctx) {
         /* server acccept event */
         svr = (void *)pfd_obj[i];
         if ((revents & POLLIN)) {
-          struct sockaddr sa;
+          struct sockaddr_in6 sa;  /* to allow ipv4 and ipv6 */
           socklen_t sa_len = sizeof(sa);  /* in/out argument */
-          int fd;
-          if ((fd = accept(svr->accept_fd, &sa, &sa_len)) >= 0) {
+          int fd = accept(svr->accept_fd, (struct sockaddr *)&sa, &sa_len);
+          if (fd >= 0) {
             h2_set_close_exec(fd);
             h2_sess_init_server(ctx, svr, fd, &sa, sa_len);
           } else {
