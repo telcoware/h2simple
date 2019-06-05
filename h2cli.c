@@ -424,6 +424,9 @@ static void help(char *prog) {
 #ifdef TLS_MODE
   fprintf(stderr, "  -k key_file           # default:eckey.pem\n");
   fprintf(stderr, "  -c cert_file          # default:eccert.pem\n");
+  fprintf(stderr, "  -V ssl_verify_opt     # default:none\n");
+  fprintf(stderr, "     # %s\n", H2_SSL_VERIFY_STR_FORMAT);
+  
 #endif
   fprintf(stderr, "  -H <settings_id>=<value>   # set http2 settings value\n");
   fprintf(stderr, "     # <settings_id> := header_table_size | enable_push |\n");
@@ -491,6 +494,7 @@ int main(int argc, char **argv) {
 #ifdef TLS_MODE
   char *key_file = "eckey.pem";    /* default private key file */
   char *cert_file = "eccert.pem";  /* default certificate file */
+  char *ssl_verify_str = "none";   /* default verify none */
 #endif
   client_job_t job = {
     .req_par = 1,
@@ -516,7 +520,7 @@ int main(int argc, char **argv) {
 
   int c;
   char scale;
-  while ((c = getopt(argc, argv, "P:C:T:S:R:k:c:H:L:Qqm:u:s:a:p:x:t:b:f:e:h")) >= 0) {
+  while ((c = getopt(argc, argv, "P:C:T:S:R:k:c:V:H:L:Qqm:u:s:a:p:x:t:b:f:e:h")) >= 0) {
     switch (c) {
     /* client run options */
     case 'P':  /* concurrent requests (ie. streams) */
@@ -546,11 +550,14 @@ int main(int argc, char **argv) {
       }
       break;
 #ifdef TLS_MODE
-    case 'k':  /* NOTE: K on server case */
+    case 'k':
       key_file = optarg;
       break;
-    case 'c':  /* NOTE: S on server case */
+    case 'c':
       cert_file = optarg;
+      break;
+    case 'V':
+      ssl_verify_str = optarg;
       break;
 #endif
     case 'H':
@@ -684,6 +691,11 @@ int main(int argc, char **argv) {
   SSL_load_error_strings();
   SSL_library_init();
   ssl_ctx = h2_ssl_ctx_init(0/*client*/, key_file, cert_file);
+  if (h2_ssl_ctx_set_verify_from_str(ssl_ctx, 1, ssl_verify_str) < 0) {
+    fprintf(stderr, "cannot set server certificate verify option: %s\n",
+            ssl_verify_str);
+    return EXIT_FAILURE;
+  }
 #endif
   ctx = h2_ctx_init(verbose_h2);
 

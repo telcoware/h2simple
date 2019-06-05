@@ -42,12 +42,35 @@ typedef struct h2_ctx h2_ctx;
 /* TLS utilities --------------------------------------------------------  */
 
 #ifdef TLS_MODE
+
 #include <openssl/ssl.h>
+
 SSL_CTX *h2_ssl_ctx_init(int is_server/* else client */,
-                         const char *key_file, const char *cert_file);
+                         const char *key_file, const char *cert_list_file);
+  /* NOTE: peer certificate verify is off by default */
   /* returned pointer is to be freed by SSL_CTX_free(SSL_CTX *ssl_ctx) */
+
+/* ssl verfif flag */
+#define H2_SSL_VERIFY_NONE  0  /* no verify; always ok; (default) */
+#define H2_SSL_VERIFY_PEER  1  /* do verify peer certificate */
+#define H2_SSL_VERIFY_PASS  2  /* server only; request client cert w/o verify */
+
+int h2_ssl_ctx_set_verify(SSL_CTX *ssl_ctx, int is_server, int ssl_verify_flag,
+                          const char *trust_file, const char *trust_dir);
+  /* trust_file is trusted CA cerfificates as PEM file */
+  /* trust_dir is trusted CA cerfificates PEM dir, prepared by 'c_rehash' */
+  /* to be used as CAfile and CApath args of SSL_CTX_loca_verify_locations() */ 
+
+#define H2_SSL_VERIFY_STR_FORMAT  \
+    "none|verify|pass[,certs_file=<ca_certs_file>][,certs_dir=<ca_certs_dir>]"
+
+int h2_ssl_ctx_set_verify_from_str(SSL_CTX *ssl_ctx, int is_server,
+                                   char *verify_str);
+
 #else
+
 typedef void SSL_CTX;
+
 #endif
 
  

@@ -61,95 +61,6 @@
 
 
 /*
- * TLS Utilities -----------------------------------------------------------
- */
-
-#ifdef TLS_MODE
-
-#include <openssl/ssl.h>
-#include <openssl/err.h>
-#include <openssl/conf.h>
-
-#if OPENSSL_VERSION_NUMBER < 0x10002000L
-#error "openssl version SHOULD be >= 1.0.2"
-#endif
-
-static int h2_server_alpn_cb(SSL *ssl, const unsigned char **out,
-                                unsigned char *outlen, const unsigned char *in,
-                                unsigned int inlen, void *arg) {
-  (void)ssl;
-  (void)arg;
-
-  return (nghttp2_select_next_protocol((void *)out, outlen, in, inlen) == 1)?
-         SSL_TLSEXT_ERR_OK : SSL_TLSEXT_ERR_NOACK;
-}
-
-SSL_CTX *h2_ssl_ctx_init(int is_server/* else client */,
-                         const char *key_file, const char *cert_file) {
-
-  if (is_server && (!key_file || !cert_file)) {
-    errx(1, "server ssl ctx requires key_file and cert_file");
-  } else if ((key_file && !cert_file) || (!key_file && cert_file)) {
-    errx(1, "key_file and cert_file should be coincident");
-  }
-
-  SSL_CTX *ssl_ctx;
-  ssl_ctx = SSL_CTX_new((is_server)? SSLv23_server_method() :
-                                     SSLv23_client_method());
-  if (!ssl_ctx) {
-    errx(1, "cannot create tls context: %s",
-         ERR_error_string(ERR_get_error(), NULL));
-  }
-
-  /* NOTE: set crypto parameters for 3GPP R15 */
-  SSL_CTX_set_options(ssl_ctx,
-                      SSL_OP_ALL | SSL_OP_NO_SSLv2 | SSL_OP_NO_SSLv3 |
-                      SSL_OP_NO_TLSv1 | SSL_OP_NO_TLSv1_1 |
-                      SSL_OP_NO_COMPRESSION |
-                      SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION);
-
-  /* FROM: 3GPP 33.210-f20 6.2 TLS protocol profiles */
-  /* for TLSv1.2 */
-  SSL_CTX_set_cipher_list(ssl_ctx,
-    "ECDHE-ECDSA-AES128-GCM-SHA256:"
-    "DHE-RSA-AES128-GCM-SHA256:"
-    "ECDHE-ECDSA-AES256-GCM-SHA384:"
-    "ECDHE-RSA-AES256-GCM-SHA384");
-  /* for TLSv1.3 */
-  /* SSL_CTX_set_ciphersuites(ssl_ctx, ""); */
-  /* default: TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:  */
-  /*          TLS_AES_128_GCM_SHA256 */
-
-  if (key_file && cert_file) {  /* coincidence already checked */
-    if (SSL_CTX_use_PrivateKey_file(ssl_ctx, key_file, SSL_FILETYPE_PEM) != 1) {
-      errx(1, "cannot use private key file %s", key_file);
-    }
-    if (SSL_CTX_use_certificate_chain_file(ssl_ctx, cert_file) != 1) {
-      errx(1, "cannot use certificate file %s", cert_file);
-    }
-  }
-
-  if (is_server) {
-    EC_KEY *ecdh = EC_KEY_new_by_curve_name(NID_X9_62_prime256v1);
-    if (!ecdh) {
-      errx(1, "EC_KEY_new_by_curv_name failed: %s",
-           ERR_error_string(ERR_get_error(), NULL));
-    }
-    SSL_CTX_set_tmp_ecdh(ssl_ctx, ecdh);
-    EC_KEY_free(ecdh);
-    SSL_CTX_set_alpn_select_cb(ssl_ctx, h2_server_alpn_cb, NULL);
-  } else {
-    /* client */
-    SSL_CTX_set_alpn_protos(ssl_ctx, (const unsigned char *)"\x02h2", 3);
-  }
-
-  return ssl_ctx;
-}
-
-#endif /* TLS_MODE */
-
-
-/*
  * File Control Flag Utilities ---------------------------------------------
  */
 
@@ -656,7 +567,8 @@ static h2_sess *h2_sess_client_start(int sock, h2_ctx *ctx,
       SSL_free(ssl);
       return NULL;
     } else if (r < 0) {
-      warnx("%s tls handshake failed: %d", authority, SSL_get_error(ssl, r));
+      warnx("%s tls handshake failed: %s",
+            authority, ERR_error_string(ERR_get_error(), NULL));
       SSL_free(ssl);
       return NULL;
     }
