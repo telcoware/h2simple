@@ -691,7 +691,7 @@ int main(int argc, char **argv) {
   SSL_load_error_strings();
   SSL_library_init();
   ssl_ctx = h2_ssl_ctx_init(0/*client*/, key_file, cert_file);
-  if (h2_ssl_ctx_set_verify_from_str(ssl_ctx, 1, ssl_verify_str) < 0) {
+  if (h2_ssl_ctx_set_verify_from_str(ssl_ctx, 0, ssl_verify_str) < 0) {
     fprintf(stderr, "cannot set server certificate verify option: %s\n",
             ssl_verify_str);
     return EXIT_FAILURE;

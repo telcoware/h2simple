@@ -62,7 +62,8 @@ int h2_ssl_ctx_set_verify(SSL_CTX *ssl_ctx, int is_server, int ssl_verify_flag,
   /* to be used as CAfile and CApath args of SSL_CTX_loca_verify_locations() */ 
 
 #define H2_SSL_VERIFY_STR_FORMAT  \
-    "none|verify|pass[,certs_file=<ca_certs_file>][,certs_dir=<ca_certs_dir>]"
+    "none|pass|verify[,certs_file=<ca_certs_file>][,certs_dir=<ca_certs_dir>]"
+  /* NOTE: certs_file, certs_dir are avaliable only with 'verify' */
 
 int h2_ssl_ctx_set_verify_from_str(SSL_CTX *ssl_ctx, int is_server,
                                    char *verify_str);
