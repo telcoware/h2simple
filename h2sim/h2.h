@@ -50,10 +50,16 @@ SSL_CTX *h2_ssl_ctx_init(int is_server/* else client */,
   /* NOTE: peer certificate verify is off by default */
   /* returned pointer is to be freed by SSL_CTX_free(SSL_CTX *ssl_ctx) */
 
-/* ssl verfif flag */
-#define H2_SSL_VERIFY_NONE  0  /* no verify; always ok; (default) */
-#define H2_SSL_VERIFY_PEER  1  /* do verify peer certificate */
-#define H2_SSL_VERIFY_PASS  2  /* server only; request client cert w/o verify */
+/* ssl verfif flag bit masks */
+/* one of these three value should be used: NONOE, PEER, PASS */
+#define H2_SSL_VERIFY_TYPE_MASK  3
+#define H2_SSL_VERIFY_NONE       0  /* no verify; always ok; (default) */
+#define H2_SSL_VERIFY_PEER       1  /* do verify peer certificate */
+#define H2_SSL_VERIFY_PASS       2  /* server only; request client cert w/o check */
+/* verify detail option to be set with H2_SSL_VERIFY_PEER */
+#define H2_SSL_VERIFY_CRL      (1 << 4)  /* check peer certificate's CRL */
+#define H2_SSL_VERIFY_CRL_ALL  (1 << 5)  /* check all CRLs except peer cert */
+#define H2_SSL_VERIFY_PURPOSE  (1 << 6)  /* check ExtendedKeyUsage extension */
 
 int h2_ssl_ctx_set_verify(SSL_CTX *ssl_ctx, int is_server, int ssl_verify_flag,
                           const char *trust_file, const char *trust_dir);
@@ -62,8 +68,9 @@ int h2_ssl_ctx_set_verify(SSL_CTX *ssl_ctx, int is_server, int ssl_verify_flag,
   /* to be used as CAfile and CApath args of SSL_CTX_loca_verify_locations() */ 
 
 #define H2_SSL_VERIFY_STR_FORMAT  \
-    "none|pass|verify[,certs_file=<ca_certs_file>][,certs_dir=<ca_certs_dir>]"
-  /* NOTE: certs_file, certs_dir are avaliable only with 'verify' */
+    "none|pass|verify[,certs_file=<ca_certs_file>][,certs_dir=<ca_certs_dir>][,crl][,crl_all][,purpose]"
+  /* NOTE: certs_file, certs_dir, crl, crl_all, purpose */
+  /*       are avaliable only with 'verify' */
 
 int h2_ssl_ctx_set_verify_from_str(SSL_CTX *ssl_ctx, int is_server,
                                    char *verify_str);

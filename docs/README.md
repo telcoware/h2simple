@@ -171,14 +171,14 @@ TLS 1K/4K/10K TPS:
 - 65K/19K/7K REMOTE A->B
 
 
-# h2cli and h2svr Performance Tests with Certificate Verify
+# h2cli and h2svr Tests with Certificate Verify
 
 server for 1k/4k/10k performance test:
 ```
 ./h2svr_r \
-  -k pse_telco/telcoware_nf1_svr.key  \
-  -c pse_telco/telcoware_nf1_svr.crt  \
-  -V verify,trust_dir=pse_telco/certs \
+  -k pse_telco/nf2_svr.key  \
+  -c pse_telco/nf2_svr.crt  \
+  -V verify,trust_dir=pse_telco/certs,crl,crl_all,purpose \
   -S http://0.0.0.0:8080 -S https://0.0.0.0:8081 \
   -m POST -p /user1k/ -s 200 -x content-type=application/json -e 1k \
   -m POST -p /user4k/ -s 200 -x content-type=application/json -e 4k \
@@ -190,9 +190,9 @@ client for tls 1k/4k/10k  performance test:
 ```
 ./h2cli_r \
   -P 100 -C 100000 -R __MDN__=01092%06d \
-  -k pse_star/starware_nf1_cli.key      \
-  -c pse_star/starware_nf1_cli.crt      \
-  -V verify,trust_dir=pse_star/certs    \
+  -k pse_star/nf1_cli.key      \
+  -c pse_star/nf1_cli.crt      \
+  -V verify,trust_dir=pse_star/certs,crl,crl_all,purpose \
   -m POST -u https://127.0.0.1:8081/user4k/__MDN__   \
           -x content-type=application/json -e 4k -q
 ```
