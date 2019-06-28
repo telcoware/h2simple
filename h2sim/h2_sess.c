@@ -858,7 +858,8 @@ void h2_sess_free(h2_sess *sess) {
     epoll_ctl(sess->ctx->epoll_fd, EPOLL_CTL_DEL, sess->fd, NULL);
     if (epoll_ctl(sess->ctx->epoll_fd, EPOLL_CTL_DEL, sess->fd, NULL) < 0) {
       /* for linux <= 2.9.0 */
-      struct epoll_event e = { 0 };
+      struct epoll_event e;
+      memset(&e, 0, sizeof(e));
       epoll_ctl(sess->ctx->epoll_fd, EPOLL_CTL_DEL, sess->fd, &e);
     }
 #endif
