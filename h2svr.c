@@ -100,6 +100,14 @@ typedef struct app_context {
 
 int request_cb(h2_sess *sess, h2_strm *strm,
                h2_msg *req, void *sess_user_data) {
+  /* TEST CASE FOR RST_STREAM */
+  /*
+  static int cnt = 0;
+  cnt++;
+  if (cnt % 100 == 0)
+    return -1;  // the caller should handle this as RST_STREAM case
+  */
+
   /* returns: 0(msg handled), >0(status code to be retured), 0<(error) */
   app_context *app_ctx = sess_user_data;
 
@@ -231,6 +239,7 @@ static void help(char *prog) {
   fprintf(stderr, "     # <settings_id> := header_table_size | enable_push |\n");
   fprintf(stderr, "     #   max_concurrent_streams, initial_window_size | max_frame_size\n");
   fprintf(stderr, "     #   max_header_list_size, enable_connect_protocol\n");
+  fprintf(stderr, "  -1                         # use HTTP/1.1 instead of HTTP/2\n");
   fprintf(stderr, "  -Q                         # h2sim io quiet mode\n");
   fprintf(stderr, "  -q                         # all quiet mode\n");
   fprintf(stderr, "rsp_case_options:\n");
@@ -280,6 +289,7 @@ int main(int argc, char **argv) {
   SSL_CTX *ssl_ctx = NULL;
   void *body;
   int body_len;
+  int http_ver = H2_HTTP_V2;
 
   h2_settings_init(&h2svr_settings);
 
@@ -295,12 +305,12 @@ int main(int argc, char **argv) {
   SSL_library_init();
 #endif
 
-  ctx = h2_ctx_init(verbose_h2); 
+  ctx = h2_ctx_init(http_ver, verbose_h2); 
 
   int c;
   int listen_num = 0;
   char scale;
-  while ((c = getopt(argc, argv, "k:c:V:S:H:Qqm:a:p:o:s:x:t:b:f:e:d:h")) >=  0) {
+  while ((c = getopt(argc, argv, "k:c:V:S:H:1Qqm:a:p:o:s:x:t:b:f:e:d:h")) >=  0) {
     switch (c) {
 #ifdef TLS_MODE
     case 'k':
@@ -349,6 +359,10 @@ int main(int argc, char **argv) {
                 optarg);
         return EXIT_FAILURE;
       }
+    case '1':
+      http_ver = H2_HTTP_V1_1;
+      h2_ctx_set_http_ver(ctx, http_ver);
+      break;
     case 'Q':
       verbose_h2 = 0;
       h2_ctx_set_verbose(ctx, verbose_h2);

@@ -138,6 +138,16 @@ h2_sbuf_idx h2_sbuf_put(h2_sbuf *sbuf, const char *str) {
   return h2_sbuf_put_n(sbuf, str, (str)? strlen(str) : 0);
 }
 
+int h2_sbuf_used(h2_sbuf *sbuf) {
+  h2_xbuf *xbuf;
+  int used = 0;
+
+  for (xbuf = &sbuf->xbuf; xbuf; xbuf = xbuf->next) {
+    used += xbuf->size - xbuf->free;
+  }
+  return used;
+}
+
 
 /*
  * Message Management ------------------------------------------------------
@@ -272,6 +282,22 @@ void h2_set_authority(h2_msg *msg, const char *authority) {
 
 void h2_set_path(h2_msg *msg, const char *path) {
   msg->path = h2_sbuf_put(&msg->sbuf, path);
+}
+
+void h2_set_method_n(h2_msg *msg, const char *method, int len) {
+  msg->method = h2_sbuf_put_n(&msg->sbuf, method, len);
+}
+
+void h2_set_scheme_n(h2_msg *msg, const char *scheme, int len) {
+  msg->scheme = h2_sbuf_put_n(&msg->sbuf, scheme, len);
+}
+
+void h2_set_authority_n(h2_msg *msg, const char *authority, int len) {
+  msg->authority = h2_sbuf_put_n(&msg->sbuf, authority, len);
+}
+
+void h2_set_path_n(h2_msg *msg, const char *path, int len) {
+  msg->path = h2_sbuf_put_n(&msg->sbuf, path, len);
 }
 
 void h2_set_status(h2_msg *rsp, int status) {
@@ -476,7 +502,7 @@ int h2_set_body(h2_msg *msg, void *body, int body_len) {
   }
 }
 
-int h2_cpy_tbody(h2_msg *msg, void *body, int body_len) {
+int h2_cpy_body(h2_msg *msg, void *body, int body_len) {
   if (msg->body) {
     free(msg->body);
   }
@@ -664,6 +690,7 @@ int h2_set_settings(h2_settings *settings, char *id_value_str)
     return -1;
   }
 
+  /* HTTP/2 Settings */
   if (!strcasecmp(id, "header_table_size")) {
     settings->header_table_size = val;
   } else if (!strcasecmp(id, "enable_push")) {
@@ -678,6 +705,11 @@ int h2_set_settings(h2_settings *settings, char *id_value_str)
     settings->max_header_list_size = val;
   } else if (!strcasecmp(id, "enable_connect_protocol")) {
     settings->enable_connect_protocol = val;
+  /* HTTP/1.1 Options */
+  } else if (!strcasecmp(id, "max_req_per_sess")) {
+    settings->max_req_per_sess = val;
+  } else if (!strcasecmp(id, "idle_timeout_sec")) {
+    settings->idle_timeout_sec = val;
   } else {
     warnx("set settings: unknown setting identifier: %s", id);
     free(str);

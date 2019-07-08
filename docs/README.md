@@ -197,3 +197,46 @@ client for tls 1k/4k/10k  performance test:
           -x content-type=application/json -e 4k -q
 ```
 
+# h2cli and h2svr HTTP/1.1 Performance Tests
+
+server for 1k/4k/10k performance test:
+```
+./h2svr_r -1 -S http://0.0.0.0:8080 -S https://0.0.0.0:8081 \
+  -m POST -p /user1k/ -s 200 -x content-type=application/json -e 1k \
+  -m POST -p /user4k/ -s 200 -x content-type=application/json -e 4k \
+  -m POST -p /user10k/ -s 200 -x content-type=application/json -e 10k \
+  -q
+```
+
+client for HTTP/1.1 tcp 1k/4k/10k  performance test:
+```
+./h2cli_r -1 -P 100 -C 100000 -R __MDN__=01092%06d      \
+  -m POST -u http://127.0.0.1:8080/user1k/__MDN__    \
+          -x content-type=application/json -e 1k -q; \
+./h2cli_r -1 -P 100 -C 100000 -R __MDN__=01092%06d      \
+  -m POST -u http://127.0.0.1:8080/user4k/__MDN__    \
+          -x content-type=application/json -e 4k -q; \
+./h2cli_r -1 -P 100 -C 100000 -R __MDN__=01092%06d      \
+  -m POST -u http://127.0.0.1:8080/user10k/__MDN__   \
+          -x content-type=application/json -e 10k -q
+```
+HTTP/1.1 TCP 1K/4K/10K TPS:
+- 160K/120K/90K LOCAL on A: Intel(R) Xeon(R) Gold 6132 CPU @ 2.60GHz
+
+
+client for HTTP/1.1 tls 1k/4k/10k  performance test:
+```
+./h2cli_r -1 -P 100 -C 100000 -R __MDN__=01092%06d      \
+  -m POST -u https://127.0.0.1:8081/user1k/__MDN__   \
+          -x content-type=application/json -e 1k -q; \
+./h2cli_r -1 -P 100 -C 100000 -R __MDN__=01092%06d      \
+  -m POST -u https://127.0.0.1:8081/user4k/__MDN__   \
+          -x content-type=application/json -e 4k -q; \
+./h2cli_r -1 -P 100 -C 100000 -R __MDN__=01092%06d      \
+  -m POST -u https://127.0.0.1:8081/user10k/__MDN__  \
+          -x content-type=application/json -e 10k -q
+```
+HTTP/1.1 TLS 1K/4K/10K TPS:
+- 90K/70K/49K LOCAL on A: Intel(R) Xeon(R) Gold 6132 CPU @ 2.60GHz
+
+

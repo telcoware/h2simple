@@ -112,7 +112,7 @@ typedef struct client_job {
   int repl_sym_mask[REQ_STEP_MAX];  /* ORs of REPL_SYM_MASK_* per req_step */
   int hdr_repl_sym_idx_mask[REQ_STEP_MAX][MSG_HDR_MAX];
                             /* bit-OR of (1 << repl_sym_idx) matched in value */
-
+  int repl_modular;  /* modular to be applied on req_id for repl_sym value */
   /* request context; 1 request message per request step  */
   int req_cnt;  /* current request status; req_psr_tasks per each req_cnt */
   req_task_t *req_par_task;  /* alloced as req_task_t[req_par] */
@@ -172,11 +172,15 @@ static void update_replace_symbol_mask(client_job_t *job) {
 }
 
 static void replace_symbol(repl_sym_fmt_t *rs, char **str_pp, int *len_p,
-                           int req_id)
+                           int req_id, int modular)
 {
   /* ASSUME: str is dynamic alloced and null terminated (even with body case) */
   char *str, *p, buf[REPL_SYM_BUF_MAX];
   int len, skip, offset, r, n;
+
+  if (modular) {
+    req_id %= modular;
+  }
 
   str = *str_pp;
   len = *len_p;
@@ -221,7 +225,8 @@ static h2_msg *gen_request(h2_msg *src, client_job_t *job,
     int i, path_len = strlen(path);
     for (i = 0; i < job->repl_sym_num; i++) {
       if ((job->repl_sym[i].mask & REPL_SYM_MASK_PATH)) {
-        replace_symbol(&job->repl_sym[i], &path, &path_len, req_task->req_id);
+        replace_symbol(&job->repl_sym[i], &path, &path_len,
+                       req_task->req_id, job->repl_modular);
       }
     }
     h2_set_path(msg, path);
@@ -242,7 +247,7 @@ static h2_msg *gen_request(h2_msg *src, client_job_t *job,
            m; m >>= 1, s++) {
         if ((m & 1)) {
           replace_symbol(&job->repl_sym[s], &value, &value_len,
-                         req_task->req_id);
+                         req_task->req_id, job->repl_modular);
         }
       }
       h2_add_hdr(msg, h2_hdr_idx_name(src, i), value);
@@ -258,7 +263,8 @@ static h2_msg *gen_request(h2_msg *src, client_job_t *job,
     if ((repl_sym_mask & REPL_SYM_MASK_BODY)) {
       for (i = 0; i < job->repl_sym_num; i++) {
         if ((job->repl_sym[i].mask & REPL_SYM_MASK_BODY))
-          replace_symbol(&job->repl_sym[i], &body, &body_len, req_task->req_id);
+          replace_symbol(&job->repl_sym[i], &body, &body_len,
+                         req_task->req_id, job->repl_modular);
       }
     }
     h2_set_body(msg, body, body_len);
@@ -306,15 +312,13 @@ static int start_request(client_job_t *job) {
     req_task->req_step = 0;
     req_task->prm_num = 0;
 
+    sleep_for_req_tps(job);
     h2_msg *req = gen_request(job->req_step_msg[0],
                               job, job->repl_sym_mask[0], req_task);
-
     if (verbose) {
       h2_dump_msg(stdout, req, "", "REQUEST[%d/%d,%d]",
                   req_task->req_id, req_task->req_step, req_task->par_idx);
     }
-
-    sleep_for_req_tps(job);
     r = h2_peer_send_request(job->req_step_peer[req_task->req_step],
                              req, NULL, req_task);
     h2_msg_free(req);
@@ -331,9 +335,12 @@ static int response_cb(h2_peer *peer, h2_msg *rsp, void *peer_user_data,
   req_task_t *req_task = strm_user_data;
   (void)rsp;
 
-  job->rsp_num++;
+  job->rsp_num++;  /* NOTE: RST_STREAM is also counted as rsp */
 
-  if (verbose) {
+  if (rsp == NULL) {
+    fprintf(stdout, "DETECT RST_STREAM FOR RESPONSE[%d/%d,%d]\n",
+            req_task->req_id, req_task->req_step, req_task->par_idx);
+  } else if (verbose) {
     h2_dump_msg(stdout, rsp, "", "RESPONSE[%d/%d,%d]",
                 req_task->req_id, req_task->req_step, req_task->par_idx);
   }
@@ -358,9 +365,13 @@ static int response_cb(h2_peer *peer, h2_msg *rsp, void *peer_user_data,
   }
 
   /* send new request */
+  sleep_for_req_tps(job);
   h2_msg *req = gen_request(job->req_step_msg[req_task->req_step], job,
                             job->repl_sym_mask[req_task->req_step], req_task);
-  sleep_for_req_tps(job);
+  if (verbose) {
+    h2_dump_msg(stdout, req, "", "REQUEST[%d/%d,%d]",
+                req_task->req_id, req_task->req_step, req_task->par_idx);
+  }
   h2_peer_send_request(peer, req, NULL, req_task);
   h2_msg_free(req);
   return 0;
@@ -397,7 +408,7 @@ static int push_response_cb(h2_peer *peer, h2_msg *prm_rsp,
   char *prm_req_path = push_stream_user_data;
   (void)peer;
   (void)peer_user_data;
-  
+ 
   if (verbose) {
     h2_dump_msg(stdout, prm_rsp, "", "PUSH_RESPONSE on %s", prm_req_path);
   }
@@ -420,7 +431,8 @@ static void help(char *prog) {
   fprintf(stderr, "  -T req_tps            # request tps; 0 for unlimited; default:0\n");
   fprintf(stderr, "  -S sess_per_peer      # sessions per server: default:1\n");
   fprintf(stderr, "  -L req_thr_for_reconn # default:0(unlimited)\n");
-  fprintf(stderr, "  -R symbol=format      # rep default:1\n");
+  fprintf(stderr, "  -R symbol=format      # replace symbol by format on req_id / modular M\n");
+  fprintf(stderr, "  -M modular_base       # modular to be applied on req_id for -R; 0: unlimited\n");
 #ifdef TLS_MODE
   fprintf(stderr, "  -k key_file           # default:eckey.pem\n");
   fprintf(stderr, "  -c cert_file          # default:eccert.pem\n");
@@ -432,6 +444,7 @@ static void help(char *prog) {
   fprintf(stderr, "     # <settings_id> := header_table_size | enable_push |\n");
   fprintf(stderr, "     #   max_concurrent_streams, initial_window_size | max_frame_size\n");
   fprintf(stderr, "     #   max_header_list_size, enable_connect_protocol\n");
+  fprintf(stderr, "  -1                    # use HTTP/1.1 instead of HTTP/2\n");
   fprintf(stderr, "  -Q                    # h2sim io quiet mode\n");
   fprintf(stderr, "  -q                    # all quiet mode\n");
   fprintf(stderr, "request_options:\n");
@@ -505,6 +518,7 @@ int main(int argc, char **argv) {
   int req_thr_for_reconn = 0; /* 0:unlimited */
   void *body;
   int body_len;
+  int http_ver = H2_HTTP_V2;
 
   h2_settings settings;
   h2_settings_init(&settings);
@@ -520,7 +534,7 @@ int main(int argc, char **argv) {
 
   int c;
   char scale;
-  while ((c = getopt(argc, argv, "P:C:T:S:R:k:c:V:H:L:Qqm:u:s:a:p:x:t:b:f:e:h")) >= 0) {
+  while ((c = getopt(argc, argv, "P:C:T:S:R:M:k:c:V:H:L:1Qqm:u:s:a:p:x:t:b:f:e:h")) >= 0) {
     switch (c) {
     /* client run options */
     case 'P':  /* concurrent requests (ie. streams) */
@@ -549,6 +563,9 @@ int main(int argc, char **argv) {
         return EXIT_FAILURE;
       }
       break;
+    case 'M':
+      job.repl_modular = atoi(optarg);
+      break;
 #ifdef TLS_MODE
     case 'k':
       key_file = optarg;
@@ -566,6 +583,9 @@ int main(int argc, char **argv) {
                 optarg);
         return EXIT_FAILURE;
       }
+    case '1':
+      http_ver = H2_HTTP_V1_1;
+      break;
     case 'Q':
       verbose_h2 = 0;
       break;
@@ -697,7 +717,7 @@ int main(int argc, char **argv) {
     return EXIT_FAILURE;
   }
 #endif
-  ctx = h2_ctx_init(verbose_h2);
+  ctx = h2_ctx_init(http_ver, verbose_h2);
 
   /* create sessions for all <scheme, authority> */
   for (i = 0; i < job.req_step_num; i++) {

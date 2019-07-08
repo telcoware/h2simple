@@ -54,6 +54,64 @@ h2_cls h2_cls_peer = { { &h2_cls_cls }, "h2_cls_peer" };
 h2_cls h2_cls_svr  = { { &h2_cls_cls }, "h2_cls_svr"  };
 h2_cls h2_cls_ctx  = { { &h2_cls_cls }, "h2_cls_ctx"  };
 
+/* HTTP/1.1 reason values per status */
+static char *http_status_reason[5][20] = {
+  { /*100*/"Continue",
+    /*101*/"Switching Protocols"
+  },
+  { /*200*/"OK",
+    /*201*/ "Created",
+    /*202*/"Accepted",
+    /*203*/"Non-Authoritative Information",
+    /*204*/"No Content",
+    /*205*/"Reset Content",
+    /*206*/"Partial Content",
+  },
+  { /*300*/"Multiple Choices",
+    /*301*/"Moved Permanently",
+    /*302*/"Found",
+    /*303*/"See Other",
+    /*304*/"Not Modified",
+    /*305*/"Use Proxy",
+    /*307*/"Temporary Redirect"
+  },
+  {
+    /*400*/"Bad Request",
+    /*401*/"Unauthorized",
+    /*402*/"Payment Required",
+    /*403*/"Forbidden",
+    /*404*/"Not Found",
+    /*405*/"Method Not Allowed",
+    /*406*/"Not Acceptable",
+    /*407*/"Proxy Authentication Required",
+    /*408*/"Request Time-out",
+    /*409*/"Conflict",
+    /*410*/"Gone",
+    /*411*/"Length Required",
+    /*412*/"Precondition Failed",
+    /*413*/"Request Entity Too Large",
+    /*414*/"Request-URI Too Large",
+    /*415*/"Unsupported Media Type",
+    /*416*/"Requested range not satisfiable",
+    /*417*/"Expectation Failed"
+  },
+  {
+    /*500*/"Internal Server Error",
+    /*501*/"Not Implemented",
+    /*502*/"Bad Gateway",
+    /*503*/"Service Unavailable",
+    /*504*/"Gateway Time-out",
+    /*505*/"HTTP Version not supported"
+  }
+};
+
+
+/* forward declaration */
+static void h2_cpy_read_data_prd(nghttp2_data_provider *data_prd, 
+                                 h2_strm *strm, void *data, int size);
+static void h2_set_read_data_prd(nghttp2_data_provider *data_prd, 
+                                 h2_strm *strm, void *data, int size);
+
 
 /*
  * NGHTTP2 Header Utilities ------------------------------------------------
@@ -100,19 +158,29 @@ static void ng_print_headers(FILE *f, nghttp2_nv *nva, size_t nvlen,
  * Stream Utilities ---------------------------------------------------------
  */
 
-static h2_strm *h2_strm_init(h2_sess *sess, int stream_id, int recv_msg_type,
-                           h2_strm_free_cb strm_free_cb, void *strm_user_data) {
+h2_strm *h2_strm_init(h2_sess *sess, int stream_id, int recv_msg_type,
+                      h2_strm_free_cb strm_free_cb, void *strm_user_data) {
   /* alloc and init stream data */
   h2_strm *strm = calloc(1, sizeof(h2_strm));
   strm->obj.cls = &h2_cls_strm;
 
-  /* add to session's stream list */
+  /* append to session's stream list */
+#if 1
+  h2_strm *st = &sess->strm_list_head;
+  while (st->next) {
+    st = st->next;
+  }
+  strm->next = NULL;
+  st->next = strm;
+  strm->prev = st;
+#else
   strm->next = sess->strm_list_head.next;
   sess->strm_list_head.next = strm;
   strm->prev = &sess->strm_list_head;
   if (strm->next) {
     strm->next->prev = strm;
   }
+#endif
 
   strm->stream_id = stream_id;
   strm->recv_msg_type = recv_msg_type;
@@ -130,7 +198,7 @@ static h2_strm *h2_strm_init(h2_sess *sess, int stream_id, int recv_msg_type,
   return strm;
 }
 
-static void h2_strm_free(h2_strm *strm) {
+void h2_strm_free(h2_strm *strm) {
 
   /* free user_data */
   if (strm->strm_free_cb) {
@@ -146,8 +214,10 @@ static void h2_strm_free(h2_strm *strm) {
   }
 
   /* clean and dealloc stream data */
-  h2_msg_free(strm->rmsg);
-  strm->rmsg = NULL;
+  if (strm->rmsg) {
+    h2_msg_free(strm->rmsg);
+    strm->rmsg = NULL;
+  }
   if (strm->send_body_rb.to_be_freed) {
     free(strm->send_body_rb.data);
   }
@@ -156,6 +226,111 @@ static void h2_strm_free(h2_strm *strm) {
   // HERE: TOOD: here goes the application logic: deallocate user_data
 
   free(strm);
+}
+
+
+/*
+ * HTTP/1.1 Message Send ---------------------------------------------------
+ */
+
+static int h2_send_request_v1_1(h2_sess *sess, h2_msg *req,
+                         h2_strm_free_cb strm_free_cb, void *strm_user_data) {
+  char *p, *buf;
+  int i, buf_len;
+
+  if (sess->is_server) {
+    warnx("%scannot send request for sess is not client sess\n",
+          sess->log_prefix);
+    return -1;
+  }
+  if (sess->is_terminated) {
+    warnx("%scannot send request for sess is terminated\n", sess->log_prefix);
+    return -1;
+  }
+
+  /* NOTE: buf should contain extra headers */
+  buf_len = 64 + h2_sbuf_used(&req->sbuf) + h2_hdr_num(req) * 4 + 
+            req->body_len + 1;
+  buf = malloc(buf_len);
+
+  /* set header */
+  p = buf;
+  p += sprintf(p, "%s %s HTTP/1.1\r\n", h2_method(req), h2_path(req));
+  p += sprintf(p, "host: %s\r\n", h2_authority(req));
+  if (req->body && req->body_len > 0) {
+    p += sprintf(p, "content-length: %d\r\n", req->body_len);
+  }
+  for (i = 0; i < req->hdr_num; i++) {
+    p += sprintf(p, "%s: %s\r\n",
+                 h2_hdr_idx_name(req, i), h2_hdr_idx_value(req, i));
+  }
+  p += sprintf(p, "\r\n");
+
+  /* set body */
+  if (req->body && req->body_len > 0) {
+    memcpy(p, req->body, req->body_len);
+    p += req->body_len;
+  }
+  *p = '\0';  /* mark NULL at the end of message */
+
+  /* ASSUME: success */ /* TODO: handled error case */
+  h2_strm *strm = h2_strm_init(sess, 2 * sess->req_cnt + 1, H2_RESPONSE,
+                               strm_free_cb, strm_user_data);
+  sess->req_cnt++;
+  strm->is_req = 1;
+
+  /* set send message as read data buf */
+  h2_set_read_data_prd(NULL, strm, buf, p - buf);
+  sess->send_data_remain += strm->send_body_rb.data_size;
+
+  return h2_sess_send(sess);
+}
+
+static int h2_send_response_v1_1(h2_sess *sess, h2_strm *strm, h2_msg *rsp) {
+  char *p, *buf, *reason = NULL;
+  int s, i, j, buf_len;
+
+  s = h2_status(rsp); 
+  i = s / 100;
+  j = s % 100;
+  if (i >= 1 && i <= 5 && j >= 0 && j <= 19) {
+    reason = http_status_reason[i - 1][j];
+  }
+  if (reason == NULL) {
+    reason = "Unknown";
+  }
+
+  buf_len = 64 + h2_sbuf_used(&rsp->sbuf) + h2_hdr_num(rsp) * 4 + rsp->body_len;
+  buf = malloc(buf_len);
+
+  /* set header */
+  p = buf;
+  p += sprintf(p, "%d %s\r\n", s, reason);
+  if (rsp->body && rsp->body_len > 0) {
+    p += sprintf(p, "content-length: %d\r\n", rsp->body_len);
+  }
+  for (i = 0; i < rsp->hdr_num; i++) {
+    p += sprintf(p, "%s: %s\r\n",
+                 h2_hdr_idx_name(rsp, i), h2_hdr_idx_value(rsp, i));
+  }
+  p += sprintf(p, "\r\n");
+
+  /* set body */
+  if (rsp->body && rsp->body_len > 0) {
+    memcpy(p, rsp->body, rsp->body_len);
+    p += rsp->body_len;
+  }
+
+  /* set send message as read data buf */
+  h2_set_read_data_prd(NULL, strm, buf, p - buf);
+
+  /* mark response to send */
+  strm->response_set = 1;
+  sess->send_data_remain += strm->send_body_rb.data_size;
+  sess->rsp_cnt++;
+
+  h2_sess_mark_send_pending(sess);
+  return 0;
 }
 
 
@@ -211,9 +386,9 @@ static ssize_t ng_send_msg_body_cb(nghttp2_session *ng_sess,
   return n;
 }
 
-inline void h2_set_read_data_prd(nghttp2_data_provider *data_prd, 
+static void h2_cpy_read_data_prd(nghttp2_data_provider *data_prd, 
                                  h2_strm *strm, void *data, int size) {
-  /* ASSUME: data!=null, size>9 */
+  /* ASSUME: data!=null, size>0 */
   h2_read_buf *read_buf = &strm->send_body_rb;
   read_buf->data = malloc(size + 1);
   memcpy(read_buf->data, data, size);
@@ -222,13 +397,35 @@ inline void h2_set_read_data_prd(nghttp2_data_provider *data_prd,
   read_buf->data_used = 0;
   read_buf->to_be_freed = 1;
   read_buf->send_msg_type = strm->send_msg_type;
-  data_prd->source.ptr = read_buf;
-  data_prd->read_callback = ng_send_msg_body_cb;
+  if (data_prd) {
+    data_prd->source.ptr = read_buf;
+    data_prd->read_callback = ng_send_msg_body_cb;
+  }
+}
+
+static void h2_set_read_data_prd(nghttp2_data_provider *data_prd, 
+                                 h2_strm *strm, void *data, int size) {
+  /* ASSUME: data!=null, size>0 */
+  /* NOTE: the caller should not free data */
+  h2_read_buf *read_buf = &strm->send_body_rb;
+  read_buf->data = data;
+  read_buf->data_size = size;
+  read_buf->data_used = 0;
+  read_buf->to_be_freed = 1;
+  read_buf->send_msg_type = strm->send_msg_type;
+  if (data_prd) {
+    data_prd->source.ptr = read_buf;
+    data_prd->read_callback = ng_send_msg_body_cb;
+  }
 }
 
 /* Send HTTP request to the remote peer */
 int h2_send_request(h2_sess *sess, h2_msg *req,
                     h2_strm_free_cb strm_free_cb, void *strm_user_data) {
+
+  if (sess->http_ver != H2_HTTP_V2) {
+    return h2_send_request_v1_1(sess, req, strm_free_cb, strm_user_data);
+  }
 
 #define REQ_HDR_MAX  (5 + H2_MSG_HDR_MAX)
   nghttp2_nv ng_hdr[REQ_HDR_MAX];
@@ -257,15 +454,14 @@ int h2_send_request(h2_sess *sess, h2_msg *req,
                   h2_hdr_idx_name(req, i), h2_hdr_idx_value(req, i));
   }
 
+  /* ASSUME: success */ /* TODO: handled error case */
   h2_strm *strm = h2_strm_init(sess, 0, H2_RESPONSE,
                                strm_free_cb, strm_user_data);
-    /* ASSUME: success */
-    /* TODO: handled error case */
 
   /* set send message body read handler */
   nghttp2_data_provider data_prd_buf, *data_prd = NULL;
   if (req->body && req->body_len > 0) {
-    h2_set_read_data_prd(&data_prd_buf, strm, req->body, req->body_len);
+    h2_cpy_read_data_prd(&data_prd_buf, strm, req->body, req->body_len);
     data_prd = &data_prd_buf;
   }
 
@@ -295,6 +491,10 @@ int h2_send_request(h2_sess *sess, h2_msg *req,
 
 int h2_send_response(h2_sess *sess, h2_strm *strm, h2_msg *rsp) {
 
+  if (sess->http_ver != H2_HTTP_V2) {
+    return h2_send_response_v1_1(sess, strm, rsp);
+  }
+
 #define RSP_HDR_MAX  (2 + H2_MSG_HDR_MAX)
   nghttp2_nv ng_hdr[RSP_HDR_MAX];
   int ng_hdr_num = 0;
@@ -315,12 +515,12 @@ int h2_send_response(h2_sess *sess, h2_strm *strm, h2_msg *rsp) {
   /* set response body read handler */
   nghttp2_data_provider data_prd_buf, *data_prd = NULL;
   if (rsp->body && rsp->body_len > 0) {
-    h2_set_read_data_prd(&data_prd_buf, strm, rsp->body, rsp->body_len);
+    h2_cpy_read_data_prd(&data_prd_buf, strm, rsp->body, rsp->body_len);
     data_prd = &data_prd_buf;
   }
 
   /* mark response sent to prevent further push_promise */
-  strm->response_sent = 1;
+  strm->response_set = 1;
   sess->send_data_remain += strm->send_body_rb.data_size;
 
   r = nghttp2_submit_response(sess->ng_sess, strm->stream_id,
@@ -377,7 +577,12 @@ int h2_send_push_promise(h2_sess *sess, h2_strm *request_strm,
   int ng_hdr_num = 0;
   int stream_id, i;
 
-  if (request_strm->response_sent) {
+  if (sess->http_ver != H2_HTTP_V2) {
+    warnx("%s[%d] Push promise is NOT available on HTTP/1.1 session",
+          sess->log_prefix, request_strm->stream_id);
+    return -1;
+  }
+  if (request_strm->response_set) {
     warnx("%s[%d] Push promise should be sent before orignal response",
           sess->log_prefix, request_strm->stream_id);
     return -1;
@@ -427,7 +632,7 @@ int h2_send_push_promise(h2_sess *sess, h2_strm *request_strm,
  * Internal Integration Handlers --------------------------------------------
  */
 
-static int h2_on_request_recv(h2_sess *sess, h2_strm *strm) {
+int h2_on_request_recv(h2_sess *sess, h2_strm *strm) {
   /* check request headers */
   if (!strm->rmsg->method || !strm->rmsg->authority || !strm->rmsg->path) {
     warnx("%s[%d] request psuedo header missing; send 400 response",
@@ -443,11 +648,20 @@ static int h2_on_request_recv(h2_sess *sess, h2_strm *strm) {
   if (sess->request_cb) {
     rs = sess->request_cb(sess, strm, strm->rmsg, sess->user_data);
   }
+
   if (rs < 0) {
+#if 1
     /* TODO: log and do response as 500 Internal Server Error */
-    warnx("%s[%d] request_cbreturns error; send 500 response: ret=%d",
+    warnx("%s[%d] request_cb returns error; send 500 response: ret=%d",
           sess->log_prefix, strm->stream_id, rs);
     rs = 500;
+#else 
+    /* TEST for RST STREAM */
+    warnx("%s[%d] request_cb returns error(%d); send RST_STREAM",
+          sess->log_prefix, rs, strm->stream_id);
+    nghttp2_submit_rst_stream(sess->ng_sess, NGHTTP2_FLAG_NONE,
+                              strm->stream_id, 0);
+#endif
   }
 
   if (rs > 0) {
@@ -459,7 +673,7 @@ static int h2_on_request_recv(h2_sess *sess, h2_strm *strm) {
   return 0;
 }
 
-static int h2_on_response_recv(h2_sess *sess, h2_strm *strm) {
+int h2_on_response_recv(h2_sess *sess, h2_strm *strm) {
   /* TODO: check response header */
   if (sess->response_cb) {
     int ret = sess->response_cb(sess, strm->rmsg,
@@ -471,6 +685,28 @@ static int h2_on_response_recv(h2_sess *sess, h2_strm *strm) {
   }
   if (strm->is_req) {
     sess->rsp_cnt++;
+    if (sess->is_terminated == 2 && 
+        sess->req_cnt == sess->rsp_cnt &&
+        sess->send_data_remain <= 0) {
+      h2_sess_terminate(sess, 0);
+    }
+  }
+  return 0;
+}
+
+static int h2_on_rst_stream_recv(h2_sess *sess, h2_strm *strm) {
+  if (strm->is_req) {
+    /* resposnse_cb is called with NULL rsp */
+    if (sess->response_cb) {
+      int ret = sess->response_cb(sess, NULL,
+                                  sess->user_data, strm->user_data);
+      if (ret < 0) {
+        warnx("%s[%d] response_cb for RST_STREAM failed; go ahead: ret=%d",
+              sess->log_prefix, strm->stream_id, ret);
+      }
+    }
+    sess->rsp_rst_cnt++;
+    sess->rsp_cnt++;  /* for req-rsp count matching */
     if (sess->is_terminated == 2 && 
         sess->req_cnt == sess->rsp_cnt &&
         sess->send_data_remain <= 0) {
@@ -703,9 +939,18 @@ static int ng_frame_recv_cb(nghttp2_session *ng_sess,
           (promised_strm = nghttp2_session_get_stream_user_data(ng_sess,
                                     frame->push_promise.promised_stream_id))) &&
         request_strm->stream_id == frame->hd.stream_id &&
-        promised_strm->stream_id ==
-          frame->push_promise.promised_stream_id) {
+        promised_strm->stream_id == frame->push_promise.promised_stream_id) {
       h2_on_push_promise_recv(sess, request_strm, promised_strm);
+    }
+    break;
+
+  case NGHTTP2_RST_STREAM:
+    warnx("%s[%d] RST_STREAM RECEIVED", sess->log_prefix, frame->hd.stream_id);
+    if ((strm ||
+         (strm = nghttp2_session_get_stream_user_data(ng_sess,
+                                                      frame->hd.stream_id))) &&
+        strm->stream_id == frame->hd.stream_id) {
+      h2_on_rst_stream_recv(sess, strm);
     }
     break;
   }
@@ -808,6 +1053,8 @@ inline char *h2_sess_close_reason_str(h2_sess *sess) {
           (sess->close_reason == CLOSE_BY_SSL_ERR)?     "SSL error" :
           (sess->close_reason == CLOSE_BY_NGHTTP2_ERR)? "nghttp2 error" :
           (sess->close_reason == CLOSE_BY_NGHTTP2_END)? "nghttp2 end" :
+          (sess->close_reason == CLOSE_BY_HTTP_ERR)?    "http error" :
+          (sess->close_reason == CLOSE_BY_HTTP_END)?    "http end" :
           "unknown");
 }
 
@@ -868,8 +1115,11 @@ void h2_sess_free(h2_sess *sess) {
     close(sess->fd);
     sess->fd = -1;
   }
-  nghttp2_session_del(sess->ng_sess);
-  sess->ng_sess = NULL;
+
+  if (sess->ng_sess) {
+    nghttp2_session_del(sess->ng_sess);
+    sess->ng_sess = NULL;
+  }
 
 #ifdef TLS_MODE
   if (sess->ssl) {
@@ -900,6 +1150,17 @@ void h2_sess_free(h2_sess *sess) {
     warnx("%sSESS FREE BUT SEND_DATA REMAINS: %d\n",
            sess->log_prefix, sess->send_data_remain);
   }
+
+  /* free http1.1 context */
+  if (sess->rdata) {
+    free(sess->rdata);
+    sess->rdata = NULL;
+    sess->rdata_alloced = 0;
+    sess->rdata_size = 0;
+    sess->rdata_used = 0;
+  }
+  sess->strm_recving = NULL;
+  sess->strm_sending = NULL;
 
   /* delete from ctx sess list */
   sess->prev->next = sess->next;

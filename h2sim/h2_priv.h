@@ -110,6 +110,9 @@ h2_sbuf_idx h2_sbuf_put_n(h2_sbuf *sbuf, const char *str, int str_len);
   /* NOTE: str might be any binary stream */
   /* ASSUME:: sbuf has enough free space; to be checked wit sbuf_avail() */
 
+int h2_sbuf_used(h2_sbuf *sbuf);
+  /* returns total size used in sbuf */
+
 
 /*
  * Messages utilities ------------------------------------------------------
@@ -188,8 +191,17 @@ struct h2_strm {
   void *user_data;          /* for client stream only; set at request submit */
 
   int is_req;               /* set whee strm is created by h2_send_request() */
-  int response_sent;        /* set when h2_send_response() is called */
+  int response_set;         /* set when h2_send_response() is called */
 };
+
+/* create strm and append to sess */
+h2_strm *h2_strm_init(h2_sess *sess, int stream_id, int recv_msg_type,
+                      h2_strm_free_cb strm_free_cb, void *strm_user_data);
+void h2_strm_free(h2_strm *strm);
+
+/* internal message recv event handler */
+int h2_on_request_recv(h2_sess *sess, h2_strm *strm);
+int h2_on_response_recv(h2_sess *sess, h2_strm *strm);
 
 
 /*
@@ -211,7 +223,7 @@ typedef struct h2_wr_buf {
   unsigned char merge_data[H2_WR_BUF_SIZE];
   int merge_size;
   /* last nghttp2_mem_send() retruned data, not sent yet */
-  const unsigned char *mem_send_data;  /* static; moved on partially sent */
+  unsigned char *mem_send_data;  /* static; moved on partially sent */
   int mem_send_size;
 } h2_wr_buf;
 
@@ -221,11 +233,15 @@ typedef struct h2_wr_buf {
 #define CLOSE_BY_SSL_ERR      (-3)
 #define CLOSE_BY_NGHTTP2_ERR  (-4)
 #define CLOSE_BY_NGHTTP2_END  (-5)
+/* for HTTP/1.1 */
+#define CLOSE_BY_HTTP_ERR     (-7)
+#define CLOSE_BY_HTTP_END     (-6)
 
 struct h2_sess {
   h2_obj obj;
   h2_sess *prev, *next;
   h2_ctx *ctx;
+  int http_ver;             /* H2_HTTP_V* */
   int is_server;
 
   h2_strm strm_list_head;
@@ -236,18 +252,36 @@ struct h2_sess {
   int close_reason;         /* CLOSE_BY_* */
   char *log_prefix;         /* dynamic alloced */
 
-  h2_wr_buf wr_buf;         /* write buffer for nonblocing send */
+  h2_wr_buf wr_buf;         /* write buffer for nonblocking send */
   int send_pending;         /* mark when send skipping by would block */
-  
   int send_data_remain;     /* sum of h2_read_buf remains to be sent */
 
-  int req_cnt;              /* for client, is_server=0 only */
-  int rsp_cnt;              /* for client, is_server=0 only */
+  int req_cnt;              /* HTTP/2: client only; HTTP/1.1: both */
+  int rsp_cnt;              /* HTTP/2: client only; HTTP/1.1: both */
+  int rsp_rst_cnt;          /* HTTP/2: client only for rst_stream on req */
+                            /*         NOTE: rsp_cnt is also counted */
   int strm_close_cnt;
   struct timeval tv_begin;
   struct timeval tv_end;
 
   int is_terminated;        /* 1:immediate, 2:wait_rsp */
+
+  /* HTTP/1.1 receive parser context */
+  /* received data buffer */
+  char *rdata;
+  int rdata_alloced;
+  int rdata_size;
+  int rdata_used;
+  int rdata_offset;         /* offset of rdata from session start */
+
+  /* HTTP/1.1 received message parsing status */ 
+  h2_strm *strm_recving;    /* maintained for recv */
+  int rmsg_header_done;     /* header is parsed all */
+  int rmsg_header_line;     /* header line count parsed */
+  int rmsg_content_length;  /* Content-Length header value */
+
+  /* HTTP/1.1 send message status */
+  h2_strm *strm_sending;    /* maintained for client request send */
 
   /* server callbacks */
   h2_request_cb request_cb;
@@ -302,8 +336,9 @@ struct h2_peer {
   int act_sess_num;         /* number of connected sessions */
 
   /* performance counts */
-  int req_cnt;              /* assume peer is for client only */
-  int rsp_cnt;              /* assume peer is for clinet only */
+  int req_cnt;              /* HTTP/2: client only; HTTP/1.1: both */
+  int rsp_cnt;              /* HTTP/2: client only; HTTP/1.1: both */
+  int rsp_rst_cnt;          /* HTTP/2: client only for rst_stream on req */
   int strm_close_cnt;       /* aggregated from sess */
   int sess_close_cnt;
   struct timeval tv_begin;
@@ -358,8 +393,8 @@ struct h2_ctx {
   /* set at h2_ctx_run() start, cleared by h2_ctx_stop() */
   int service_flag;
 
-  /* verbose flag */
-  int verbose;
+  int http_ver;   /* HTTP version; H2_HTTP_V* */
+  int verbose;    /* verbose flag */
 };
 
 

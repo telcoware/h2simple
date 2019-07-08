@@ -107,6 +107,11 @@ void h2_set_scheme(h2_msg *req, const char *scheme);
 void h2_set_authority(h2_msg *req, const char *authority);
 void h2_set_path(h2_msg *req, const char *path);
 void h2_set_status(h2_msg *rsp, int status);
+/* set message psuedo headers with len */
+void h2_set_method_n(h2_msg *req, const char *method, int len);
+void h2_set_scheme_n(h2_msg *req, const char *scheme, int len);
+void h2_set_authority_n(h2_msg *req, const char *authority, int len);
+void h2_set_path_n(h2_msg *req, const char *path, int len);
 
 /* set request message's scheme, authority and path */
 int h2_set_req_uri(h2_msg *req, const char *uri);
@@ -151,7 +156,7 @@ int h2_set_body(h2_msg *msg, void *body, int body_len);
   /* not to be freed by the caller after this call */
   /* returns 1(valid body), 0(null body) or <0(error) */
 int h2_cpy_body(h2_msg *msg, void *body, int body_len);
-  /* assigne msg body by copied from given body */
+  /* assign msg body by copied from given body */
   /* returns 1(valid body), 0(null body) or <0(error) */
 
 /* message dump utility */
@@ -161,9 +166,8 @@ void h2_dump_msg(FILE *fp, h2_msg *msg, const char *line_prefix,
 
 /* Session Http2 Settings ------------------------------------------------ */
 
-#define H2_SETTINGS_MAX  8
-
 typedef struct h2_settings {  /* use value 0 for default value */
+  /* HTTP/2 Settings */
   int header_table_size;  
   int enable_push;
   int max_concurrent_streams;
@@ -171,6 +175,9 @@ typedef struct h2_settings {  /* use value 0 for default value */
   int max_frame_size;
   int max_header_list_size;
   int enable_connect_protocol;
+  /* HTTP/1.1 Options: NOT EFFECTIVE YET */
+  int max_req_per_sess;  /* 1:single req, >1:/multiple req per conn */
+  int idle_timeout_sec;  /* idle connection timeout */
 } h2_settings;
 
 void h2_settings_init(h2_settings *settingss);  /* must be call before set */
@@ -199,6 +206,7 @@ int h2_sess_terminate(h2_sess *sess, int wait_rsp);
 /* client side callbacks */
 typedef int (*h2_response_cb)(h2_sess *sess, h2_msg *rsp,
                     void *sess_user_data, void *strm_user_data);
+  /* NOTE: rsp might be NULL on RST_STREAM */
   /* returns: 0(ok), 0<(error) */
 typedef int (*h2_push_promise_cb)(
                     h2_sess *sess, h2_msg *prm_req,
@@ -312,10 +320,17 @@ SSL_CTX *h2_svr_ssl_ctx(h2_svr *svr);
 
 /* H2 Service Context ---------------------------------------------------- */
 
-h2_ctx *h2_ctx_init(int verbose);
+/* http version option */
+#define H2_HTTP_V1_1    1
+#define H2_HTTP_V2      2
+#define H2_HTTP_V2_TRY  3  /* HTTP/1.1 trying to upgrade to HTTP/2 */
+
+h2_ctx *h2_ctx_init(int http_ver, int verbose);
 void h2_ctx_free(h2_ctx *ctx);
 void h2_ctx_run(h2_ctx *ctx);
 void h2_ctx_stop(h2_ctx *ctx);  /* mark ctx run look stop */
+
+void h2_ctx_set_http_ver(h2_ctx *ctx, int http_ver);
 void h2_ctx_set_verbose(h2_ctx *ctx, int verbose);
 
 
