@@ -384,6 +384,7 @@ static int h2_sess_recv(h2_sess *sess) {
  */
 
 void h2_settings_init(h2_settings *settings) {
+  /* HTTP/2 */
   settings->header_table_size = -1; 
   settings->enable_push = -1;
   settings->max_concurrent_streams = -1;

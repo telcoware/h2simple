@@ -705,11 +705,6 @@ int h2_set_settings(h2_settings *settings, char *id_value_str)
     settings->max_header_list_size = val;
   } else if (!strcasecmp(id, "enable_connect_protocol")) {
     settings->enable_connect_protocol = val;
-  /* HTTP/1.1 Options */
-  } else if (!strcasecmp(id, "max_req_per_sess")) {
-    settings->max_req_per_sess = val;
-  } else if (!strcasecmp(id, "idle_timeout_sec")) {
-    settings->idle_timeout_sec = val;
   } else {
     warnx("set settings: unknown setting identifier: %s", id);
     free(str);

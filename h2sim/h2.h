@@ -175,9 +175,6 @@ typedef struct h2_settings {  /* use value 0 for default value */
   int max_frame_size;
   int max_header_list_size;
   int enable_connect_protocol;
-  /* HTTP/1.1 Options: NOT EFFECTIVE YET */
-  int max_req_per_sess;  /* 1:single req, >1:/multiple req per conn */
-  int idle_timeout_sec;  /* idle connection timeout */
 } h2_settings;
 
 void h2_settings_init(h2_settings *settingss);  /* must be call before set */
