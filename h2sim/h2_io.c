@@ -51,19 +51,10 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/conf.h>
-#else
-/* NOTE: h2_util.h defines dummy SSL_CTX and SSL */
 #endif
-
-#include <nghttp2/nghttp2.h>
 
 #include "h2.h"
 #include "h2_priv.h"
-
-
-/* forward declaration */
-static int h2_sess_recv_v1_1(h2_sess *sess, const void *data, int size);
-static int h2_sess_send_once_v1_1(h2_sess *sess);
 
 
 /*
@@ -110,7 +101,7 @@ void h2_sess_mark_send_pending(h2_sess *sess) {
   }
 }
 
-inline void h2_sess_clear_send_pending(h2_sess *sess) {
+void h2_sess_clear_send_pending(h2_sess *sess) {
   if (sess->send_pending) {
 #ifdef EPOLL_MODE
     struct epoll_event e;
@@ -120,189 +111,6 @@ inline void h2_sess_clear_send_pending(h2_sess *sess) {
 #endif
     sess->send_pending = 0;
   }
-}
-
-static int h2_sess_send_once_v2(h2_sess *sess) {
-  h2_wr_buf *wb = &sess->wr_buf;
-  int sent, total_sent = 0;
-#ifdef TLS_MODE
-  SSL *ssl = sess->ssl;
-  int r;
-#endif
-#ifdef EPOLL_MODE
-  int mem_send_zero = 0;
-#endif
-
-  /* NOTE: send is always blocking */
-  /* TODO: save and retry to send on last to_send data */
-
-  if (wb->merge_size > 0 || wb->mem_send_size > 0) {
-    warnx("### DEBUG: REENTRY WITH REMAINING WRITE: "
-          "merge_size=%d mem_send_size=%d", wb->merge_size, wb->mem_send_size);
-  }
-
-  while (wb->mem_send_size <= 0 && wb->merge_size < H2_WR_BUF_SIZE) {
-    const uint8_t *mem_send_data;
-    ssize_t mem_send_size;
-    
-    mem_send_size = nghttp2_session_mem_send(sess->ng_sess, &mem_send_data);
-    /* DEBUG: to check mem_send size */
-    /* fprintf(stderr, "%d ", (int)mem_send_size); */
-
-    if (mem_send_size < 0) {
-      /* probablly NGHTTP2_ERR_NOMEM; abort immediately */
-      warnx("nghttp2_session_mem_send() error: %s",
-            nghttp2_strerror(mem_send_size));
-      sess->close_reason = CLOSE_BY_NGHTTP2_ERR;
-      return -1;
-    } else if (mem_send_size == 0) {
-      /* no more data to send */
-#ifdef EPOLL_MODE
-      mem_send_zero = 1; 
-#endif
-      break;
-    } else if (wb->merge_size + mem_send_size <= (int)sizeof(wb->merge_data)) {
-      /* merge to buf */
-      memcpy(&wb->merge_data[wb->merge_size], mem_send_data, mem_send_size);
-      wb->merge_size += mem_send_size;
-    } else {
-      /* cannot merge to buf */
-      wb->mem_send_data = (void *)mem_send_data;
-      wb->mem_send_size = mem_send_size;
-      break;
-    }
-  }
-
-  /* HERE: DEBUG: to check merge_size and mem_send size */
-  //fprintf(stderr, "%d+%d ", wb->merge_size, wb->mem_send_size);
-
-  /* try to send merge_data once */
-  if (wb->merge_size > 0) {
-#ifdef TLS_MODE
-    if (ssl) {
-      r = SSL_write(ssl, wb->merge_data, wb->merge_size);
-      if (r > 0) {
-        sent = wb->merge_size;
-      } else {  /* r <= 0 */
-        if (SSL_get_error(ssl, r) == SSL_ERROR_WANT_WRITE) {
-          fprintf(stderr, "DEBUG: TLS SEND merge_data WOULD BLOCK: "
-                  "to_send=%d\n", (int)wb->merge_size);
-          /* NOTE: should be repeated with same buf, and size */
-          h2_sess_mark_send_pending(sess);
-          return total_sent;  /* retry later */
-        }
-        warnx("SSL_write(merge_data) error: %d", SSL_get_error(ssl, r));
-        sess->close_reason = CLOSE_BY_SSL_ERR;
-        return -2;
-      }
-    } else
-#endif
-    {
-      sent = send(sess->fd, wb->merge_data, wb->merge_size, 0);
-      if (sent <= 0) {
-        // note: in linux EAGAIN=EWHOULDBLOCK but some oldes are not */
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-          fprintf(stderr, "DEBUG: TCP SEND merge_data WOULD BLOCK: "
-                  "to_send=%d\n", (int)wb->merge_size);
-          h2_sess_mark_send_pending(sess);
-          return total_sent;
-        }
-        warnx("send() error with to_send=%d: %s",
-              wb->merge_size, strerror(errno));
-        sess->close_reason = CLOSE_BY_SOCK_ERR;
-        return -3;
-      }
-    }
-
-    //warnx("### DEBUG: DATA SENT: merge_buf sent=%d", sent);
-    total_sent += sent;
-
-    if (sent < wb->merge_size) {
-      /* DEBUG: to check partial send for tcp socket buffer overflow */
-      warnx("### DEBUG: MERGE_BUF PARTIAL!!! %d/%d ", sent, wb->merge_size);
-
-      memmove(wb->merge_data, &wb->merge_data[sent], wb->merge_size - sent);
-      wb->merge_size -= sent;
-      h2_sess_mark_send_pending(sess);
-      return total_sent;  /* possible block at send */
-    } else {
-      wb->merge_size = 0;
-    }
-  }
-
-  /* try to send mem_send_data once */
-  if (wb->mem_send_size) {
-#ifdef TLS_MODE
-    if (ssl) {
-      r = SSL_write(ssl, wb->mem_send_data, wb->mem_send_size);
-      if (r > 0) {
-        sent = wb->mem_send_size;
-      } else {  /* r <= 0 */
-        if (SSL_get_error(ssl, r) == SSL_ERROR_WANT_WRITE) {
-          fprintf(stderr, "DEBUG: TLS SEND mem_send_data WOULD BLOCK: "
-                  "to_send=%d\n", (int)wb->mem_send_size);
-          /* NOTE: should be repeated with same buf, and size */
-          h2_sess_mark_send_pending(sess);
-          return total_sent;  /* retry later */
-        }
-        warnx("SSL_write(mem_send_data) error: %d", SSL_get_error(ssl, r));
-        sess->close_reason = CLOSE_BY_SSL_ERR;
-        return -2;
-      }
-    } else
-#endif
-    {
-      sent = send(sess->fd, wb->mem_send_data, wb->mem_send_size, 0);
-      if (sent <= 0) {
-        // note: in linux EAGAIN=EWHOULDBLOCK but some oldes are not */
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-          fprintf(stderr, "DEBUG: TCP SEND mem_send_data WOULD BLOCK: "
-                  "to_send=%d\n", (int)wb->mem_send_size);
-          h2_sess_mark_send_pending(sess);
-          return total_sent;
-        }
-        warnx("send() error with to_send=%d: %s",
-              wb->mem_send_size, strerror(errno));
-        sess->close_reason = CLOSE_BY_SOCK_ERR;
-        return -5;
-      }
-    }
-
-    //warnx("### DEBUG: DATA SENT: mem_send sent=%d", sent);
-    total_sent += sent;
-
-    if (sent < wb->mem_send_size) {
-      /* indication for possible block at next */
-      /* DEBUG: to check partial send for tcp socket buffer overflow */
-      fprintf(stderr, "### DEBUG: MEM_SEND PARTIAL!!!%d/%d ", sent, wb->mem_send_size);
-      wb->mem_send_data += sent;
-      wb->mem_send_size -= sent;
-      h2_sess_mark_send_pending(sess);
-      return total_sent;  /* possible block at send */
-    } else {
-      wb->mem_send_data = NULL;
-      wb->mem_send_size = 0;
-    }
-  }
-
-  if (total_sent == 0) {
-    h2_sess_clear_send_pending(sess);
-    /*
-    static int c = 0;
-    c++;
-    warnx("### DEBUG: [%d] EXIT WITHOUT SENT DATA: merge_size=%d "
-          "mem_send_size=%d", c, wb->merge_size, wb->mem_send_size);
-    */
-  }
-
-#ifdef EPOLL_MODE
-  if (mem_send_zero && !nghttp2_session_want_read(sess->ng_sess)) {
-    sess->close_reason = CLOSE_BY_NGHTTP2_END;
-    return -6;
-  }
-#endif
-
-  return total_sent;
 }
 
 int h2_sess_send(h2_sess *sess) {
@@ -359,17 +167,13 @@ static int h2_sess_recv(h2_sess *sess) {
   //warnx("### DEBUG: DATA RECEIVED: recv_len=%d", (int)recv_len);
 
   if (sess->http_ver == H2_HTTP_V2) {
-    read_len = nghttp2_session_mem_recv(sess->ng_sess, buf, recv_len);
     /* NOTE: read_len is same as recv_len on success case */
-    if (read_len < 0) {
-      warnx("Fatal error: %s", nghttp2_strerror((int)read_len));
+    if ((read_len = h2_sess_recv_v2(sess, buf, recv_len)) < 0) {
       sess->close_reason = CLOSE_BY_NGHTTP2_ERR;
       return -3;
     }
   } else {
-    read_len = h2_sess_recv_v1_1(sess, buf, recv_len);
-    if (read_len < 0) {
-      warnx("HTTP/1.1 read error: ret=%d", (int)read_len);
+    if ((read_len = h2_sess_recv_v1_1(sess, buf, recv_len)) < 0) {
       sess->close_reason = CLOSE_BY_HTTP_ERR;
       return -3;
     }
@@ -377,597 +181,6 @@ static int h2_sess_recv(h2_sess *sess) {
 
   return (int)read_len;
 }
-
-
-/*
- * Http2 Settings Handling -------------------------------------------------
- */
-
-void h2_settings_init(h2_settings *settings) {
-  /* HTTP/2 */
-  settings->header_table_size = -1; 
-  settings->enable_push = -1;
-  settings->max_concurrent_streams = -1;
-  settings->initial_window_size = -1;
-  settings->max_frame_size = -1;
-  settings->max_header_list_size = -1;
-  settings->enable_connect_protocol = -1;
-}
-
-static int h2_sess_send_settings(h2_sess *sess, h2_settings *settings) {
-  nghttp2_settings_entry iv[16];
-  int r, iv_num = 0;
-
-  if (sess->http_ver != H2_HTTP_V2) {
-    return 0;  /* simply ignored on HTTP/1.1 session */
-  }
-
-  if (settings) {
-    if (settings->header_table_size >= 0) {
-      iv[iv_num].settings_id = NGHTTP2_SETTINGS_HEADER_TABLE_SIZE;
-      iv[iv_num++].value = settings->header_table_size;
-    }
-    if (settings->enable_push >= 0) {
-      iv[iv_num].settings_id = NGHTTP2_SETTINGS_ENABLE_PUSH;
-      iv[iv_num++].value = settings->enable_push;
-    }
-    if (settings->max_concurrent_streams >= 0) {
-      iv[iv_num].settings_id = NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS;
-      iv[iv_num++].value = settings->max_concurrent_streams;
-    }
-    if (settings->initial_window_size >= 0) {
-      iv[iv_num].settings_id = NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE;
-      iv[iv_num++].value = settings->initial_window_size;
-    }
-    if (settings->max_frame_size >= 0) {
-      iv[iv_num].settings_id = NGHTTP2_SETTINGS_MAX_FRAME_SIZE;
-      iv[iv_num++].value = settings->max_frame_size;
-    }
-    if (settings->max_header_list_size >= 0) {
-      iv[iv_num].settings_id = NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE;
-      iv[iv_num++].value = settings->max_header_list_size;
-    }
-    if (settings->enable_connect_protocol >= 0) {
-      iv[iv_num].settings_id = NGHTTP2_SETTINGS_ENABLE_CONNECT_PROTOCOL;
-      iv[iv_num++].value = settings->enable_connect_protocol;
-    }
-  }
-
-  r = nghttp2_submit_settings(sess->ng_sess, NGHTTP2_FLAG_NONE, iv, iv_num);
-  if (r != 0) {
-    warnx("submit setting failed: %s", nghttp2_strerror(r));
-    return -1;
-  }
-  return h2_sess_send(sess);
-}
-
-
-/*
- * HTTP/1.1 I/O Handlers -----------------------------------------------------
- */
-
-static int h2_sess_recv_hdl_once_v1_1(h2_sess *sess) {
-  /* returns 1(message parse completed), 0(parse not completed), <0(error) */
-  h2_msg *rmsg;
-  if (sess->strm_recving) {
-    rmsg = sess->strm_recving->rmsg;
-  } else {
-    /* check for starting new strm and rmsg */
-    if (sess->is_server) {
-      sess->strm_recving = h2_strm_init(sess, sess->req_cnt * 2 + 1,
-                                        H2_REQUEST, NULL, NULL);
-    } else {  /* client */
-      if (sess->strm_list_head.next == NULL) {
-        warnx("%sHTTP/1.1 response received for no request at %d: "
-              "rdata_used=%d rdata_size=%d",
-              sess->log_prefix, sess->rdata_offset + sess->rdata_used,
-              sess->rdata_used, sess->rdata_size);
-        return -1;
-      }
-      sess->strm_recving = sess->strm_list_head.next;
-    }
-    sess->rmsg_header_done = 0;
-    sess->rmsg_header_line = 0;
-    sess->rmsg_content_length = 0;
-    rmsg = sess->strm_recving->rmsg;
-  }
-
-  /* check and parse http header */
-  if (!sess->rmsg_header_done) {
-    char *base = sess->rdata + sess->rdata_used;
-    char *limit = sess->rdata + sess->rdata_size;
-    char *p, *q;
-
-    p = base;
-    while (p < limit && (p = memchr(p, '\n', limit - p))) {
-      char *end = p;
-      /* remove '\r\n' from end pointer */
-      if (end > base && *(end -1) == '\r') {
-        end--;
-      }
-      /* check emplty line for header end mark */
-      if (end == base) { 
-        sess->rdata_used = p + 1 - sess->rdata;
-        sess->rmsg_header_done = 1;
-        break;
-      }
-      if (sess->rmsg_header_line == 0) {
-        /* first line special handling */
-        if (sess->is_server) {
-          /* parse Request-Line */
-          /* trim off version and spaces */
-          if (end >= base + 1/*method*/ + 1 + 1/*path*/ + 1 + 8/*version*/ &&
-              !memcmp(end - 8, "HTTP/1.1", 8)) {
-            end -= 8; 
-          } else {
-            warnx("%sHTTP/1.1 request line parse failed at %ld",
-                  sess->log_prefix, sess->rdata_offset + base - sess->rdata);
-            return -1;
-          }
-          while (end >= base + 1/*method*/ + 1 + 1/*path*/ &&
-                 (*(end - 1) == ' ' || *(end - 1) == '\t')) {
-            end--;
-          }
-          /* find method */
-          for (q = base; q < end && *q != ' ' && *q != '\t'; q++) {
-            /* to count non-space chars */
-          }
-          h2_set_method_n(rmsg, base, q - base);
-          h2_set_scheme(rmsg, (sess->ssl)? "https" : "http");
-          h2_set_authority(rmsg,  "http");
-          /* find path */
-	  for (; q < end && (*q == ' ' || *q == '\t'); q++) {
-            /* to skip spaces */
-          }
-          h2_set_path_n(rmsg, q, end - q);
-        } else {
-          /* parse Status-Line */
-          q = base;
-          if (end - base >= 3 &&
-              q[0] >= '1' && q[0] <= '5' &&
-              q[1] >= '0' && q[1] <= '9' &&
-              q[2] >= '0' && q[2] <= '9' &&
-              (end - base <= 3 || (q[3] == ' ' || q[3] == '\t'))) {
-            /* NOTE: ignore reason part */
-            h2_set_status(rmsg,
-                          ((int)(q[0] - '0')) * 100 +
-                          ((int)(q[1] - '0')) * 10 +
-                          ((int)(q[2] - '0')) * 1);
-          } else {
-            warnx("%sHTTP/1.1 status line parse failed at %ld",
-                  sess->log_prefix, sess->rdata_offset + base - sess->rdata);
-            return -2;
-          }
-        }
-      } else {
-        /* parse message-header */
-        /* TODO: NEED TO HANDLE MULTI LINE VALUE */
-        if ((q = memchr(base, ':', end - base))) {
-          char *name = base;
-          int nlen = q - base;
-          /* trim off space heading and tail from value */
-          char *value = q + 1;
-          while (value < end && (*value == ' ' || *value == '\t')) {
-            value++;
-          }
-          while (end > value && (*(end - 1) == ' ' || *(end - 1) == '\t')) {
-            end--;
-          }
-          /* now append header */
-          if (nlen == 4 && !strncasecmp(name, "host", 4) &&
-              sess->is_server) {
-            h2_set_authority_n(rmsg, value, end - value);
-          } else if (nlen == 14 && !strncasecmp(name, "content-length", 14)) {
-            /* TODO: NEED MORE STRICT CHECKING */
-            sess->rmsg_content_length = atoi(value); 
-          } else {
-            /* TODO: NEED TO HANDLE Connection: for continued or close */
-            /* TODO: NEED TO HANDLE Transfer-Encoding: for chunked body */
-            h2_add_hdr_n(rmsg, name, nlen, value, end - value);
-          }
-        } else {
-          warnx("%sHTTP/1.1 message header parse failed at %ld",
-                sess->log_prefix, sess->rdata_offset + base - sess->rdata);
-          return -3;
-        }
-      }
-      p ++;
-      base = p;
-      sess->rdata_used = base - sess->rdata;
-      sess->rmsg_header_line++;
-    }
-    /* now, create meassage and parse header */
-  }
-
-  /* check and parse http body */
-  if (sess->rmsg_header_done) {
-    if (sess->rmsg_content_length && h2_body_len(rmsg) == 0) {
-      /* check for data avaiable for content_length */
-      /* TODO: NEED TO HANDLE Chunked Body case */
-      if (sess->rdata_size - sess->rdata_used >= sess->rmsg_content_length) {
-        h2_cpy_body(rmsg, sess->rdata + sess->rdata_used,
-                    sess->rmsg_content_length);
-        sess->rdata_used += sess->rmsg_content_length; 
-      }
-    }
-    if (sess->rmsg_content_length == h2_body_len(rmsg)) {
-      /* now, message compeleted, call app callbacks */
-      int r;
-      if (sess->is_server) {
-        sess->req_cnt++;
-        r = h2_on_request_recv(sess, sess->strm_recving);
-      } else {  /* client */
-        r = h2_on_response_recv(sess, sess->strm_recving);
-        h2_strm_free(sess->strm_recving);
-        sess->strm_close_cnt++;
-        //{
-        //  static int n = 0;
-        //  printf("DEBUG[%d]: req_cnt=%d rsp_cnt=%d strm_close_cnt=%d\n",
-        //         m++, sess->req_cnt, sess->rsp_cnt, sess->strm_close_cnt);
-        //}
-      }
-      sess->strm_recving = NULL;
-      return (r >= 0)? 1 : r;
-    }
-  }
-  return 0;
-}
-
-static int h2_sess_recv_v1_1(h2_sess *sess, const void *data, int size) {
-  /* append to rdata */
-  if (sess->rdata == NULL) {
-#define RDATA_ALLOC_DEF  (16 * 1024)
-    sess->rdata_alloced = (size >= RDATA_ALLOC_DEF)? size : RDATA_ALLOC_DEF;
-    sess->rdata = malloc(sess->rdata_alloced);
-    memcpy(sess->rdata, data, size);
-    sess->rdata_size = size; 
-    sess->rdata_used = 0;
-  } else if (sess->rdata_alloced >= sess->rdata_size + size) {
-    /* just append new data */ 
-    memcpy(sess->rdata + sess->rdata_size, data, size);
-    sess->rdata_size += size;
-  } else {
-    /* realloc buffer and remove rdata_used */
-    if (sess->rdata_alloced < sess->rdata_size - sess->rdata_used + size) {
-      sess->rdata_alloced = sess->rdata_size - sess->rdata_used + size;
-      sess->rdata = realloc(sess->rdata, sess->rdata_alloced); 
-    }
-    sess->rdata_size -= sess->rdata_used;
-    sess->rdata_offset += sess->rdata_used;
-    if (sess->rdata_size) {
-      memmove(sess->rdata, sess->rdata + sess->rdata_used, sess->rdata_size);
-    } 
-    sess->rdata_used = 0;
-    /* append new data */ 
-    memcpy(sess->rdata + sess->rdata_size, data, size);
-    sess->rdata_size += size;
-  }
-
-  /* try to parse and handle message */
-  int r;
-  while ((r = h2_sess_recv_hdl_once_v1_1(sess)) == 1) {
-    /* repeat for all message availiable */
-    if (sess->rdata_used == sess->rdata_size || sess->is_terminated == 1) {
-      break;
-    }
-  }
-  if (r < 0) {
-    warnx("%sh2_sess_recv_hdl_once_v1_1() failed: ret=%d", sess->log_prefix, r);
-    return -1;
-  }
-
-  /* on all rdata handled, deallocated extended buffer */
-  if (sess->rdata_used == sess->rdata_size &&
-      sess->rdata_alloced > RDATA_ALLOC_DEF) {
-    sess->rdata_offset += sess->rdata_used;
-    free(sess->rdata);
-    sess->rdata = NULL;
-    sess->rdata_alloced = 0;
-    sess->rdata_size = 0;
-    sess->rdata_used = 0;
-  }
-  return size;
-}
-
-int h2_sess_send_once_v1_1(h2_sess *sess) {
-  h2_wr_buf *wb = &sess->wr_buf;
-  int sent, total_sent = 0;
-#ifdef TLS_MODE
-  SSL *ssl = sess->ssl;
-  int r;
-#endif
-
-  /* NOTE: send is always blocking */
-
-  if (wb->merge_size > 0 || wb->mem_send_size > 0) {
-    warnx("### DEBUG: REENTRY WITH REMAINING WRITE: "
-          "merge_size=%d mem_send_size=%d", wb->merge_size, wb->mem_send_size);
-  }
-
-  /* try to use stream's read buffer for send data */
-  while (wb->mem_send_size <= 0 && wb->merge_size < H2_WR_BUF_SIZE) {
-    const uint8_t *strm_send_data = NULL;
-    ssize_t strm_send_size = 0;
-    h2_strm *strm, *strm_next;
-    h2_read_buf *rb;
-   
-    /* TODO: TO BE REIMPLEMNTED */
-    if (sess->is_server) {
-      /* check and flush last sent strm */
-      for (strm = sess->strm_list_head.next;
-           strm && strm->response_set;
-           strm = strm_next) {
-        strm_next = strm->next;
-	rb = &strm->send_body_rb;
-        if (rb->data_used >= rb->data_size) {
-          h2_strm_free(strm);  /* strm.data are all sent; free stream */
-          sess->strm_close_cnt++;
-          //{
-          //  static int n = 0;
-          //  printf("DEBUG[%d]: req_cnt=%d rsp_cnt=%d strm_close_cnt=%d\n",
-          //         n, sess->req_cnt, sess->rsp_cnt, sess->strm_close_cnt);
-          //}
-          continue;
-
-        } else {  /* found data to send */
-          strm_send_data = rb->data + rb->data_used;
-          strm_send_size = rb->data_size - rb->data_used;
-          rb->data_used = rb->data_size;
-          break;
-        }
-      }
-    } else {  /* client */
-      if (sess->strm_sending == NULL) {
-        sess->strm_sending = sess->strm_list_head.next;
-      } 
-      while ((strm = sess->strm_sending)) {
-	rb = &strm->send_body_rb;
-        if (rb->data_used >= rb->data_size) {
-          sess->strm_sending = strm->next;
-        } else {
-          strm_send_data = rb->data + rb->data_used;
-          strm_send_size = rb->data_size - rb->data_used;
-          rb->data_used = rb->data_size;
-          break;
-        }
-      }
-    }
-
-    /* DEBUG: to check mem_send size */
-    /* fprintf(stderr, "%d ", (int)strm_send_size); */
-
-    // HERE: TODO: MARK CURRENT STREAM FOR MEM_SEND_DATA
-    if (strm_send_size == 0) {
-      /* no more data to send */
-      break;
-    } else if (wb->merge_size + strm_send_size <= (int)sizeof(wb->merge_data)) {
-      /* merge to buf */
-      memcpy(&wb->merge_data[wb->merge_size], strm_send_data, strm_send_size);
-      wb->merge_size += strm_send_size;
-    } else {
-      /* cannot merge to buf */
-      wb->mem_send_data = (void *)strm_send_data;
-      wb->mem_send_size = strm_send_size;
-      break;
-    }
-  }
-
-  /* HERE: DEBUG: to check merge_size and mem_send size */
-  //fprintf(stderr, "%d+%d ", wb->merge_size, wb->mem_send_size);
-
-  /* try to send merge_data once */
-  if (wb->merge_size > 0) {
-#ifdef TLS_MODE
-    if (ssl) {
-      r = SSL_write(ssl, wb->merge_data, wb->merge_size);
-      if (r > 0) {
-        sent = wb->merge_size;
-      } else {  /* r <= 0 */
-        if (SSL_get_error(ssl, r) == SSL_ERROR_WANT_WRITE) {
-          fprintf(stderr, "DEBUG: TLS SEND merge_data WOULD BLOCK: "
-                  "to_send=%d\n", (int)wb->merge_size);
-          /* NOTE: should be repeated with same buf, and size */
-          h2_sess_mark_send_pending(sess);
-          return total_sent;  /* retry later */
-        }
-        warnx("SSL_write(merge_data) error: %d", SSL_get_error(ssl, r));
-        sess->close_reason = CLOSE_BY_SSL_ERR;
-        return -2;
-      }
-    } else
-#endif
-    {
-      sent = send(sess->fd, wb->merge_data, wb->merge_size, 0);
-      if (sent <= 0) {
-        // note: in linux EAGAIN=EWHOULDBLOCK but some oldes are not */
-        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) {
-          fprintf(stderr, "DEBUG: TCP SEND merge_data WOULD BLOCK: "
-                  "to_send=%d\n", (int)wb->merge_size);
-          h2_sess_mark_send_pending(sess);
-          return total_sent;
-        }
-        warnx("send() error with to_send=%d: %s",
-              wb->merge_size, strerror(errno));
-        sess->close_reason = CLOSE_BY_SOCK_ERR;
-        return -3;
-      }
-    }
-
-    //warnx("### DEBUG: DATA SENT: merge_buf sent=%d", sent);
-    total_sent += sent;
-    sess->send_data_remain -= sent;
-
-    if (sent < wb->merge_size) {
-      /* DEBUG: to check partial send for tcp socket buffer overflow */
-      warnx("### DEBUG: MERGE_BUF PARTIAL!!! %d/%d ", sent, wb->merge_size);
-
-      memmove(wb->merge_data, &wb->merge_data[sent], wb->merge_size - sent);
-      wb->merge_size -= sent;
-      h2_sess_mark_send_pending(sess);
-      return total_sent;  /* possible block at send */
-    } else {
-      wb->merge_size = 0;
-    }
-  }
-
-  /* try to send mem_send_data once */
-  if (wb->mem_send_size) {
-#ifdef TLS_MODE
-    if (ssl) {
-      r = SSL_write(ssl, wb->mem_send_data, wb->mem_send_size);
-      if (r > 0) {
-        sent = wb->mem_send_size;
-      } else {  /* r <= 0 */
-        if (SSL_get_error(ssl, r) == SSL_ERROR_WANT_WRITE) {
-          fprintf(stderr, "DEBUG: TLS SEND mem_send_data WOULD BLOCK: "
-                  "to_send=%d\n", (int)wb->mem_send_size);
-          /* NOTE: should be repeated with same buf, and size */
-          h2_sess_mark_send_pending(sess);
-          return total_sent;  /* retry later */
-        }
-        warnx("SSL_write(mem_send_data) error: %d", SSL_get_error(ssl, r));
-        sess->close_reason = CLOSE_BY_SSL_ERR;
-        return -2;
-      }
-    } else
-#endif
-    {
-      sent = send(sess->fd, wb->mem_send_data, wb->mem_send_size, 0);
-      if (sent <= 0) {
-        // note: in linux EAGAIN=EWHOULDBLOCK but some oldes are not */
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-          fprintf(stderr, "DEBUG: TCP SEND mem_send_data WOULD BLOCK: "
-                  "to_send=%d\n", (int)wb->mem_send_size);
-          h2_sess_mark_send_pending(sess);
-          return total_sent;
-        }
-        warnx("send() error with to_send=%d: %s",
-              wb->mem_send_size, strerror(errno));
-        sess->close_reason = CLOSE_BY_SOCK_ERR;
-        return -5;
-      }
-    }
-
-    //warnx("### DEBUG: DATA SENT: mem_send sent=%d", sent);
-    total_sent += sent;
-    sess->send_data_remain -= sent;
-
-    if (sent < wb->mem_send_size) { 
-      /* indication for possible block at next */
-      /* DEBUG: to check partial send for tcp socket buffer overflow */
-      fprintf(stderr, "### DEBUG: MEM_SEND PARTIAL!!!%d/%d ",
-              sent, wb->mem_send_size);
-
-      wb->mem_send_data += sent;
-      wb->mem_send_size -= sent;
-      h2_sess_mark_send_pending(sess);
-      return total_sent;  /* possible block at send */
-    } else {
-      wb->mem_send_data = NULL;
-      wb->mem_send_size = 0;
-    }
-  }
-
-  if (total_sent == 0) {
-    h2_sess_clear_send_pending(sess);
-    /*
-    static int c = 0;
-    c++;
-    warnx("### DEBUG: [%d] EXIT WITHOUT SENT DATA: merge_size=%d "
-          "mem_send_size=%d", c, wb->merge_size, wb->mem_send_size);
-    */
-  }
-
-  return total_sent;
-}
-
-
-/*
- * HTTP/1.1 to HTTP/2 Upgrade Handlers -------------------------------------
- */
-
-#if 0
-static int base64_encode(void *_org, int org_len, char *buf)
-{
-  static char encode_map[64] = {
-    /* A - Z */
-    65, 66, 67, 68, 69, 70, 71, 72,
-    73, 74, 75, 76, 77, 78, 79, 80,
-    81, 82, 83, 84, 85, 86, 87, 88, 89, 90,
-    /* a - z */
-    97, 98, 99, 100, 101, 102, 103, 104,
-    105, 106, 107, 108, 109, 110, 111, 112,
-    113, 114, 115, 116, 117, 118, 119, 120, 121, 122,
-    /* 0 - 9 */
-    48, 49, 50, 51, 52, 53, 54, 55, 56, 57,
-    /* + / */
-    43, 47
-  };
-
-  unsigned char *org = (unsigned char *)_org;
-  char *e = buf;
-  int i, x;
-
-  for (i = 0; i < org_len; i += 3) {
-    if (org_len - i >= 3) {
-      x = ((int)org[i] << 16) + ((int)org[i+1] << 8) + ((int)org[i+2]);
-      e[0] = encode_map[(x >> 18) & 0x3f];
-      e[1] = encode_map[(x >> 12) & 0x3f];
-      e[2] = encode_map[(x >>  6) & 0x3f];
-      e[3] = encode_map[(x) & 0x3f];
-    }
-    else if (org_len - i == 2) {  /* only two characters remain */
-      x = ((int)org[i] << 16) + ((int)org[i+1] << 8);
-      e[0] = encode_map[(x >> 18) & 0x3f];
-      e[1] = encode_map[(x >> 12) & 0x3f];
-      e[2] = encode_map[(x >>  6) & 0x3f];
-      e[3] = '=';
-    }
-    else {  // n - i == 1  /* only one character remains */
-      x = ((int)org[i] << 16);
-      e[0] = encode_map[(x >> 18) & 0x3f];
-      e[1] = encode_map[(x >> 12) & 0x3f];
-      e[2] = '=';
-      e[3] = '=';
-    }
-    e += 4;
-  }
-
-  /* returns encoded size */
-  return e - buf;
-}
-
-static int h2_sess_send_upgrade_req_tcp(h2_sess *sess, const char *authority,
-                                        h2_settings *settings) {
-  char sb[256], sb64[1024];
-  int sb64_len = 0;
-
-  if (settings) {
-#define ADD_SETTINGS(_id, _field)  \
-    if (settings->_field) {  \
-      uint16_t id = htons(_id);  \
-      uint32_t value = htonl(settings->_field);  \
-      memcpy(p + 0, &id, 2);  \
-      memcpy(p + 2, &value, 4);  \
-      p += 6;  \
-    }
-
-    void *p = sb;
-    ADD_SETTINGS(NGHTTP2_SETTINGS_HEADER_TABLE_SIZE, header_table_size);
-    ADD_SETTINGS(NGHTTP2_SETTINGS_ENABLE_PUSH, enable_push);
-    ADD_SETTINGS(NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, max_concurrent_streams);
-    ADD_SETTINGS(NGHTTP2_SETTINGS_INITIAL_WINDOW_SIZE, initial_window_size);
-    ADD_SETTINGS(NGHTTP2_SETTINGS_MAX_FRAME_SIZE, max_frame_size);
-    ADD_SETTINGS(NGHTTP2_SETTINGS_MAX_HEADER_LIST_SIZE, max_header_list_size);
-    ADD_SETTINGS(NGHTTP2_SETTINGS_ENABLE_CONNECT_PROTOCOL, enable_connect_protocol);
-    sb64_len = base64_encode(sb, p - (void *)sb, sb64);
-  }
-  sb64[sb64_len] = '\0';
-
-  h2_msg_free(req);
-  return h2_sess_send(sess);
-}
-#endif
 
 
 /*
@@ -1014,22 +227,10 @@ int h2_sess_terminate(h2_sess *sess, int wait_rsp) {
     sess->is_terminated = 1/* immediate */;
 
     if (sess->http_ver == H2_HTTP_V2) {
-      int r = nghttp2_session_terminate_session(sess->ng_sess, NGHTTP2_NO_ERROR);
-      if (r < 0) {
-        warnx("%snghttp2_session_terminate_session() failed: ret=%d",
-              sess->log_prefix, r);
-        return -1;
-      }
+      h2_sess_term_v2(sess);
     } else {
-      /* close socket force */
-      if (sess->ssl) {
-        SSL_set_shutdown(sess->ssl, SSL_SENT_SHUTDOWN | SSL_RECEIVED_SHUTDOWN);
-        SSL_shutdown(sess->ssl);
-      } else {
-        shutdown(sess->fd, SHUT_WR | SHUT_RD);
-      }
+      h2_sess_term_v1_1(sess);
     } 
-
     h2_sess_mark_send_pending(sess);
   }
 
@@ -1042,7 +243,8 @@ int h2_sess_terminate(h2_sess *sess, int wait_rsp) {
  */
 
 static h2_sess *h2_sess_init_client(h2_ctx *ctx, SSL *ssl,
-                                    int fd, const char *authority) {
+                                    int fd, const char *authority,
+                                    int http_ver) {
   h2_sess *sess = calloc(1, sizeof(h2_sess));
   sess->obj.cls = &h2_cls_sess;
 
@@ -1056,7 +258,7 @@ static h2_sess *h2_sess_init_client(h2_ctx *ctx, SSL *ssl,
   ctx->sess_num++;
 
   sess->ctx = ctx;
-  sess->http_ver = ctx->http_ver;
+  sess->http_ver = http_ver;
   sess->is_server = 0;
   sess->ssl = ssl;
   sess->fd = fd;
@@ -1097,7 +299,9 @@ static h2_sess *h2_sess_init_client(h2_ctx *ctx, SSL *ssl,
   }
 #endif
 
-  h2_sess_nghttp2_init(sess);
+  if (http_ver == H2_HTTP_V2 || http_ver == H2_HTTP_V2_TRY) {
+    h2_sess_init_v2(sess);
+  }
 
   /* mark start time */
   gettimeofday(&sess->tv_begin, NULL);
@@ -1109,7 +313,7 @@ static h2_sess *h2_sess_client_start(int sock, h2_ctx *ctx,
                     const char *authority, SSL_CTX *client_ssl_ctx,
                     h2_settings *settings) {
   SSL *ssl = NULL;
-  int http_ver = 0;
+  int http_ver = ctx->http_ver;
 #ifdef TLS_MODE
 #else
   (void)client_ssl_ctx;
@@ -1134,7 +338,7 @@ static h2_sess *h2_sess_client_start(int sock, h2_ctx *ctx,
             authority, ERR_error_string(ERR_get_error(), NULL));
       return NULL;
     }
-    if (ctx->http_ver == H2_HTTP_V2 || ctx->http_ver == H2_HTTP_V2_TRY) {
+    if (http_ver == H2_HTTP_V2 || http_ver == H2_HTTP_V2_TRY) {
       SSL_set_alpn_protos(ssl, (const unsigned char *)"\x02h2", 3);
     }
     SSL_set_fd(ssl, sock);
@@ -1153,7 +357,7 @@ static h2_sess *h2_sess_client_start(int sock, h2_ctx *ctx,
     SSL_get0_alpn_selected(ssl, &alpn, &alpnlen);
     if (alpn && alpnlen == 2 && !memcmp("h2", alpn, 2)) {
       http_ver = H2_HTTP_V2;
-    } else if (ctx->http_ver == H2_HTTP_V2) {
+    } else if (http_ver == H2_HTTP_V2) {
       warnx("%s h2 is not negotiated; HTTP/2 failed", authority);
       SSL_free(ssl);
       return NULL;
@@ -1164,16 +368,13 @@ static h2_sess *h2_sess_client_start(int sock, h2_ctx *ctx,
   }
 #endif /* TLS_MODE */
   
-  h2_sess *sess = h2_sess_init_client(ctx, ssl, sock, authority);
+  h2_sess *sess = h2_sess_init_client(ctx, ssl, sock, authority, http_ver);
   if (sess == NULL) {
     return NULL;
   }
-  if (http_ver) {
-    sess->http_ver = http_ver;
-  }
 
   char *transport = (client_ssl_ctx)? "TLS" : "TCP";
-  if (sess->http_ver == H2_HTTP_V2) {
+  if (http_ver == H2_HTTP_V2) {
     /* HTTP2 initial message */
     if (h2_sess_send_settings(sess, settings) < 0) {
       h2_sess_free(sess);
@@ -1181,7 +382,7 @@ static h2_sess *h2_sess_client_start(int sock, h2_ctx *ctx,
     }
     fprintf(stderr, "%sCONNECTED %s HTTP/2 TO %s\n",
             sess->log_prefix, transport, authority);
-  } else if (sess->http_ver == H2_HTTP_V2_TRY) {
+  } else if (http_ver == H2_HTTP_V2_TRY) {
     /* try to upgrade to HTTP2; TCP only */
 #if 0  /* TODO: TO BE IMPLEMENTED */
     if (h2_sess_send_upgrade_req_tcp(sess, authority, settings) < 0) {
@@ -1289,9 +490,9 @@ h2_sess *h2_connect(h2_ctx *ctx, const char *authority, SSL_CTX *cli_ssl_ctx,
  */
 
 static int h2_sess_server_tcp_start(h2_sess *sess, h2_settings *settings) {
-  h2_sess_nghttp2_init(sess);
 
   if (sess->http_ver == H2_HTTP_V2) {
+    h2_sess_init_v2(sess);
     if (h2_sess_send_settings(sess, settings) < 0) {
       return -1;
     } 
@@ -1300,6 +501,7 @@ static int h2_sess_server_tcp_start(h2_sess *sess, h2_settings *settings) {
     fprintf(stderr, "%sCONNECTED TCP HTTP/1.1\n", sess->log_prefix);
   } else {
     /* NOTE: on client's setting received, h2_sess_send_settings() is called */
+    h2_sess_init_v2(sess);
     fprintf(stderr, "%sCONNECTED TCP HTTP/1.1 UPGRADABLE TO HTTP/2\n",
             sess->log_prefix);
   }
@@ -1326,7 +528,7 @@ static int h2_sess_server_tls_start(h2_sess *sess, h2_settings *settings) {
   }
 
   if (sess->http_ver == H2_HTTP_V2) {
-    h2_sess_nghttp2_init(sess);
+    h2_sess_init_v2(sess);
     if (h2_sess_send_settings(sess, settings) < 0) {
        return -1;
     }
@@ -1773,6 +975,15 @@ void h2_ctx_run(h2_ctx *ctx) {
       sess_next = sess->next;  /* for sess free case */
       pfd[n].fd = sess->fd;
       pfd[n].events = 0;
+#if 1
+      /* do not use nghttp2_session info; just follow epoll event status */
+      if (sess->is_terminated != 1) {
+        pfd[n].events |= POLLIN;
+      }
+      if (sess->send_pending) {
+        pfd[n].events |= POLLOUT;
+      }
+#else 
       if (sess->http_ver == H2_HTTP_V2) {
         if (nghttp2_session_want_read(sess->ng_sess)) {
           pfd[n].events |= POLLIN;
@@ -1781,13 +992,14 @@ void h2_ctx_run(h2_ctx *ctx) {
           pfd[n].events |= POLLOUT;
         }
       } else {
-        if (sess->is_terminated == 0) {
+        if (sess->is_terminated == 1) {
           pfd[n].events |= POLLIN;
         }
         if (sess->send_pending) {
           pfd[n].events |= POLLOUT;
         }
       }
+#endif
       if (pfd[n].events == 0) {
         sess->close_reason = CLOSE_BY_HTTP_END;
         h2_sess_free(sess);

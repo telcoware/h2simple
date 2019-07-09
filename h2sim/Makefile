@@ -12,7 +12,7 @@ CFLAGS=-O3 -g -W -Wall -Werror
 #LDFLAGS=
 
 LIBH2SIM_HDRS=h2.h h2_priv.h
-LIBH2SIM_SRCS=h2_msg.c h2_sess.c h2_io.c h2_ssl.c
+LIBH2SIM_SRCS=h2_msg.c h2_sess.c h2_io.c h2_ssl.c h2_v2.c h2_v1_1.c
 LIBH2SIM_OBJS=$(LIBH2SIM_SRCS:.c=.o)
 
 

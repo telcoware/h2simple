@@ -35,8 +35,6 @@
 #include <fcntl.h>
 #include <sys/types.h>
 
-#include <nghttp2/nghttp2.h>
-
 #include "h2.h"
 #include "h2_priv.h"
 
@@ -55,6 +53,36 @@
 
 
 /*
+ * ALPN Selection ---------------------------------------------------------
+ */
+
+static int select_next_protocol(unsigned char **out, unsigned char *outlen,
+                                const unsigned char *in, unsigned int inlen,
+                                const char *key, unsigned int keylen) {
+  unsigned int i;
+  for (i = 0; i + keylen <= inlen; i += (unsigned int)(in[i] + 1)) {
+    if (memcmp(&in[i], key, keylen) == 0) {
+      *out = (unsigned char *)&in[i + 1];
+      *outlen = in[i];
+      return 0;
+    }
+  }
+  return -1;
+}
+
+static int ng_select_next_protocol(unsigned char **out, unsigned char *outlen,
+                                const unsigned char *in, unsigned int inlen) {
+  if (select_next_protocol(out, outlen, in, inlen, "\x2h2", 3) == 0) {
+    return 1;
+  }
+  if (select_next_protocol(out, outlen, in, inlen, "\x8http/1.1", 9) == 0) {
+    return 0;
+  }
+  return -1;
+}
+
+
+/*
  * TLS Context Intialize --------------------------------------------------
  */
 
@@ -63,8 +91,7 @@ static int h2_server_alpn_cb(SSL *ssl, const unsigned char **out,
                                 unsigned int inlen, void *arg) {
   (void)ssl;
   (void)arg;
-
-  return (nghttp2_select_next_protocol((void *)out, outlen, in, inlen) == 1)?
+  return (ng_select_next_protocol((void *)out, outlen, in, inlen) == 1)?
          SSL_TLSEXT_ERR_OK : SSL_TLSEXT_ERR_NOACK;
 }
 

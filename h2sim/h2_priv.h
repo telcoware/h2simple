@@ -163,6 +163,52 @@ void h2_msg_clean_static(h2_msg *msg);
 
 
 /*
+ * HTTP Common IO Handlers: defined in "h2_io.c" ---------------------------
+ */
+
+void h2_sess_mark_send_pending(h2_sess *sess);
+void h2_sess_clear_send_pending(h2_sess *sess);
+
+
+/*
+ * HTTP/2 Handlers: defined in "h2_v2.c" -----------------------------------
+ */
+
+/* send message */
+int h2_send_request_v2(h2_sess *sess, h2_msg *req,
+                       h2_strm_free_cb strm_free_cb, void *strm_user_data);
+int h2_send_response_v2(h2_sess *sess, h2_strm *strm, h2_msg *rsp);
+int h2_send_push_promise_v2(h2_sess *sess, h2_strm *request_strm,
+                            h2_msg *prm_req, h2_msg *prm_rsp);
+
+/* io */
+int h2_sess_send_once_v2(h2_sess *sess);
+int h2_sess_send_settings(h2_sess *sess, h2_settings *settings);
+int h2_sess_recv_v2(h2_sess *sess, const void *data, int size);
+/* sess manange */
+void h2_sess_init_v2(h2_sess *sess);
+void h2_sess_free_v2(h2_sess *sess);
+void h2_sess_term_v2(h2_sess *sess);
+
+
+/*
+ * HTTP/1.1 Handlers: deifned in "h2_v1_1.c" -------------------------------
+ */
+
+/* send message */
+int h2_send_request_v1_1(h2_sess *sess, h2_msg *req,
+                         h2_strm_free_cb strm_free_cb, void *strm_user_data);
+
+int h2_send_response_v1_1(h2_sess *sess, h2_strm *strm, h2_msg *rsp);
+
+/* io */
+int h2_sess_send_once_v1_1(h2_sess *sess);
+int h2_sess_recv_v1_1(h2_sess *sess, const void *data, int size);
+/* sess manange */
+void h2_sess_term_v1_1(h2_sess *sess);
+
+
+/*
  * Stream Utilities --------------------------------------------------------
  */
 
@@ -296,7 +342,6 @@ struct h2_sess {
 };
 
 /* sess management */
-void h2_sess_nghttp2_init(h2_sess *sess);
 void h2_sess_free(h2_sess *sess);
 
 /* mark something to be sent */
