@@ -359,6 +359,7 @@ int main(int argc, char **argv) {
                 optarg);
         return EXIT_FAILURE;
       }
+      break;
     case '1':
       http_ver = H2_HTTP_V1_1;
       h2_ctx_set_http_ver(ctx, http_ver);

@@ -175,14 +175,12 @@ h2_msg *h2_msg_init() {
   if (msg) {
     h2_sbuf_init(&msg->sbuf, sizeof(msg->sbuf_buf), H2_MSG_SBUF_EXT_STEP);
   }
-
   /*
-  fprintf(stderr, "HERE: DEBUG: sizeof(h2_msg)=%d H2_MSG_SBUF_SIZE=%d "
+  fprintf(stderr, "DEBUG: sizeof(h2_msg)=%d H2_MSG_SBUF_SIZE=%d "
           "sizeof(h2_xbuf)=%d H2_MSG_SBUF_EXT_STEP=%d\n",
           (int)sizeof(h2_msg), H2_MSG_SBUF_SIZE,
           (int)sizeof(h2_xbuf), H2_MSG_SBUF_EXT_STEP);
   */
-
   return msg;
 }
 
@@ -222,6 +220,17 @@ void h2_cpy_msg(h2_msg *dst, h2_msg *src) {
       dst->body[src->body_len] = '\0';
       dst->body_len = src->body_len;    
     }
+  }
+}
+
+void h2_prepare_req(h2_msg *req, h2_peer *ref_peer,
+                    const char *method, const char *path) {
+  if (req && ref_peer) {
+    /* set request pseudo headers */
+    h2_set_method(req, method);
+    h2_set_scheme(req, (ref_peer->ssl_ctx)? "https" : "http");
+    h2_set_authority(req, ref_peer->authority);
+    h2_set_path(req, path);
   }
 }
 
@@ -658,61 +667,4 @@ void h2_dump_msg(FILE *fp, h2_msg *msg, const char *line_prefix,
     fprintf(fp, "%s  %s\n", line_prefix, (char *)msg->body);
   }
 }
-
-
-/* Settings Parameter Utilties ------------------------------------------- */
-
-int h2_set_settings(h2_settings *settings, char *id_value_str)
-  /* id_value_str is <id>=<value> formatted string */
-  /* returns 0(ok) or <0(failed) */
-{
-  char *str, *id, *p;
-  int val;
-
-  if (settings == NULL || id_value_str == NULL) {
-    warnx("set settings: invalid arguments: settings=%p id_value_str=%p",
-          settings, id_value_str);
-    return -1;
-  }
-
-  str = strdup(id_value_str);
-  id = str;
-  if ((p = strchr(str, '=')) == NULL) {
-    warnx("set settings: format should be <id>=<value>: %s", id_value_str);
-    free(str);
-    return -1;
-  }
-  *p = '\0';  /* make id a string */
-  p++;  /* skip '=' from value */
-  if (sscanf(p, "%i", &val) != 1 || val < 0) {
-    warnx("set settings: value should be natural number: %s", p);
-    free(str);
-    return -1;
-  }
-
-  /* HTTP/2 Settings */
-  if (!strcasecmp(id, "header_table_size")) {
-    settings->header_table_size = val;
-  } else if (!strcasecmp(id, "enable_push")) {
-    settings->enable_push = val;
-  } else if (!strcasecmp(id, "max_concurrent_streams")) {
-    settings->max_concurrent_streams = val;
-  } else if (!strcasecmp(id, "initial_window_size")) {
-    settings->initial_window_size = val;
-  } else if (!strcasecmp(id, "max_frame_size")) {
-    settings->max_frame_size = val;
-  } else if (!strcasecmp(id, "max_header_list_size")) {
-    settings->max_header_list_size = val;
-  } else if (!strcasecmp(id, "enable_connect_protocol")) {
-    settings->enable_connect_protocol = val;
-  } else {
-    warnx("set settings: unknown setting identifier: %s", id);
-    free(str);
-    return -1; 
-  }
-
-  free(str);
-  return 0;
-}
-
 

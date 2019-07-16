@@ -31,6 +31,7 @@
 #include <ctype.h>
 #include <poll.h>
 #include <fcntl.h>
+#include <time.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <sys/time.h>  /* for gettimeofday() */
@@ -51,8 +52,10 @@
 #include "h2sim/h2.h"
 
 
-int verbose = 1;
-
+int service_flag = 1;
+int verbose = 1;           /* h2cli verbose */
+int verbose_h2 = 1;        /* h2sim verbose */
+int long_tr_thr_msec = 0;  /* long transaction detection; 0:disabled */
 
 #define CLIENT_JOB_REPL_SYM_MAX  16    /* replace symbol max */
                                        /* MUST be < 32 for repl_sym_idx_mask */
@@ -89,6 +92,9 @@ typedef struct {
   int req_step;  /* 0 ~ req_step_num-1 */
   /* push promise status */
   int prm_num;   /* push promize per this request */
+  /* for long transaction detection */
+  h2_msg *req;   /* request message backuped for long transaction report */
+  struct timeval req_tv;
 } req_task_t;
 
 /* server connections per <scheme, authority> */
@@ -120,8 +126,10 @@ typedef struct client_job {
   h2_peer *req_step_peer[REQ_STEP_MAX];
   int req_step_num;
 
-  /* response status */
-  int rsp_num;  /* reponse message count */
+  /* request send and response recv status */
+  int req_msg_max;  /* req_max * req_step_num */
+  int req_msg_num;  /* request send count */
+  int rsp_msg_num;  /* response callback count */
 
   /* request tps control; managed by sleep_for_req_tps() */
   struct timeval start_tv;
@@ -132,6 +140,43 @@ svr_peer_t svr_peers[SVR_PEER_MAX];
 int svr_peer_num = 0;
 
  
+/*
+ * Request Counting Utilities -----------------------------------------------
+ */
+
+static int req_counting_line_printed = 0;
+
+static void req_counting_print(client_job_t *job) {
+  int pc = job->req_msg_num * 100 / job->req_msg_max;
+  int dots = (pc < 100)? pc / 2 + 1 : 50;
+  char buf[52];
+
+  memset(buf, '#', dots);
+  buf[dots] = '\0';
+  printf("\r> req msgs: %-9d |%-50s|%3d%%",
+         job->req_msg_num, buf, job->req_msg_num * 100 / job->req_msg_max);
+  fflush(stdout);
+  req_counting_line_printed = 1;
+}
+
+static void req_counting_update(client_job_t *job) {
+  static time_t last_update_time = 0;
+  if (!verbose && !verbose_h2 && time(NULL) != last_update_time) {
+    last_update_time = time(NULL);
+    req_counting_print(job);
+  }
+}
+
+static void req_counting_line_clear() {
+  if (req_counting_line_printed) {
+    printf("\r%80s", "");
+    printf("\r");
+    fflush(stdout);
+    req_counting_line_printed = 0;
+  }
+}
+
+
 /*
  * Replace Symbold Utilities ------------------------------------------------
  */
@@ -278,14 +323,19 @@ static h2_msg *gen_request(h2_msg *src, client_job_t *job,
  * H2 Application Callbacks ------------------------------------------------
  */
 
+/* forward declaration */
+static int response_cb(h2_peer *peer, h2_msg *rsp, void *peer_user_data,
+                       void *strm_user_data);
+static int push_response_cb(h2_peer *peer, h2_msg *prm_rsp,
+                            void *peer_user_data, void *push_stream_user_data);
+
 static void sleep_for_req_tps(client_job_t *job) { 
   if (job->start_tv.tv_sec == 0) {
     gettimeofday(&job->start_tv, NULL);
   } if (job->req_tps > 0) {
     struct timeval cur_tv, sleep_tv;
     long long elapsed_usec, sleep_usec;
-
-    gettimeofday(&cur_tv, NULL);
+gettimeofday(&cur_tv, NULL);
     elapsed_usec = ((cur_tv.tv_sec - job->start_tv.tv_sec) * 1000000 +
                     (cur_tv.tv_usec - job->start_tv.tv_usec));
     sleep_usec = ((long long)(job->req_cnt) * 1000000 / job->req_tps
@@ -302,7 +352,10 @@ static int start_request(client_job_t *job) {
   int i, r;
 
   job->req_cnt = 0;
-  job->rsp_num = 0;
+  job->req_msg_max = job->req_max * job->req_step_num;
+  job->req_msg_num = 0;
+  job->rsp_msg_num = 0;
+  req_counting_update(job);
 
   /* send initial requests as req_par */
   for (i = 0; i < job->req_par && job->req_cnt < job->req_max; i++) {
@@ -319,12 +372,27 @@ static int start_request(client_job_t *job) {
       h2_dump_msg(stdout, req, "", "REQUEST[%d/%d,%d]",
                   req_task->req_id, req_task->req_step, req_task->par_idx);
     }
-    r = h2_peer_send_request(job->req_step_peer[req_task->req_step],
-                             req, NULL, req_task);
-    h2_msg_free(req);
+    if (long_tr_thr_msec) {
+      gettimeofday(&req_task->req_tv, NULL);
+    }
+    req_task->req = req;  /* to be freed in response_cb */
+    r = h2_send_request(job->req_step_peer[req_task->req_step], req,
+                        response_cb, req_task);
+    job->req_msg_num++;
+    req_counting_update(job);
     if (r < 0) {
+      h2_msg_free(req_task->req);
+      req_task->req = NULL;
       break;
     }
+  }
+
+  /* check for all request sent, then terminate marking no more request */
+  if (job->req_msg_num >= job->req_msg_max) {
+    for (i = 0; i < svr_peer_num; i++) {
+      h2_terminate(svr_peers[i].peer, 1);
+    }
+    req_counting_line_clear();
   }
   return 0;
 }
@@ -335,33 +403,72 @@ static int response_cb(h2_peer *peer, h2_msg *rsp, void *peer_user_data,
   req_task_t *req_task = strm_user_data;
   (void)rsp;
 
-  job->rsp_num++;  /* NOTE: RST_STREAM is also counted as rsp */
+  /* check for long traction report case */
+  if (long_tr_thr_msec) {
+    struct timeval cur_tv, req_tv = req_task->req_tv;
+    int elapsed_msec;
 
-  if (rsp == NULL) {
-    fprintf(stdout, "DETECT RST_STREAM FOR RESPONSE[%d/%d,%d]\n",
-            req_task->req_id, req_task->req_step, req_task->par_idx);
-  } else if (verbose) {
-    h2_dump_msg(stdout, rsp, "", "RESPONSE[%d/%d,%d]",
-                req_task->req_id, req_task->req_step, req_task->par_idx);
-  }
+    gettimeofday(&cur_tv, NULL);
+    if (cur_tv.tv_usec >= req_tv.tv_usec) {
+      elapsed_msec = (cur_tv.tv_sec - req_tv.tv_sec) * 1000 +
+                     (cur_tv.tv_usec - req_tv.tv_usec) / 1000;
+    } else {
+      elapsed_msec = (cur_tv.tv_sec - req_tv.tv_sec - 1) * 1000 +
+                     (1000000 + cur_tv.tv_usec - req_tv.tv_usec) / 1000;
+    }
+    if (elapsed_msec >= long_tr_thr_msec) {
+      static int ltc = 0; 
 
-  /* prepare new request */
-  if (req_task->req_step + 1 < job->req_step_num) {
-    req_task->req_step += 1;
-  } else if (job->req_cnt < job->req_max) {
-    req_task->req_id = job->req_cnt++; 
-    req_task->req_step = 0;
-    req_task->prm_num = 0;
-  } else {
-    if (job->rsp_num >= job->req_max * job->req_step_num &&
-        job->req_max >= 0 /* effective only when req_max is not zero */) {
-      /* NOTE: all peers are closed at once */
-      int i;
-      for (i = 0; i < svr_peer_num; i++) {
-        h2_peer_terminate(svr_peers[i].peer, 0);
+      ltc++;
+      req_counting_line_clear();
+      fprintf(stdout, "LONG TRANSACTION(%d) DETECTED: "
+              "elapsed_msec=%d req_id=%d req_step=%d par_idx=%d\n",
+              ltc, elapsed_msec, 
+              req_task->req_id, req_task->req_step, req_task->par_idx);
+      h2_dump_msg(stdout, req_task->req, "",
+                  "LONG TRANSACTION(%d) REQUEST[%d/%d,%d]", ltc,
+                  req_task->req_id, req_task->req_step, req_task->par_idx);
+      if (rsp) {
+        h2_dump_msg(stdout, rsp, "",
+                    "LONG TRANSACTION(%d) RESPONSE[%d/%d,%d]", ltc,
+                    req_task->req_id, req_task->req_step, req_task->par_idx);
+      } else {
+        fprintf(stdout, "LONG TRANSACTION(%d) RESPONSE: NONE\n", ltc);
       }
     }
-    return 0;  /* no more request stream */
+  }
+
+  /* force to clean up request message */
+  if (req_task->req) {
+    h2_msg_free(req_task->req);
+    req_task->req = NULL;
+  }
+
+  if (!service_flag) {
+    return 0;  /* just ignore on service stop */
+  }
+
+  if (rsp == NULL) {
+    fprintf(stdout, "DETECT STREAM CLOSED; RETRY REQUEST[%d/%d,%d]\n",
+            req_task->req_id, req_task->req_step, req_task->par_idx);
+  } else {
+    if (verbose) {    
+      h2_dump_msg(stdout, rsp, "", "RESPONSE[%d/%d,%d]",
+                  req_task->req_id, req_task->req_step, req_task->par_idx);
+    }
+    job->rsp_msg_num++;  /* NOTE: RST_STREAM is also counted as rsp */
+
+    /* prepare new request */
+    if (req_task->req_step + 1 < job->req_step_num) {
+      req_task->req_step += 1;
+    } else if (job->req_cnt < job->req_max) {
+      req_task->req_id = job->req_cnt++; 
+      req_task->req_step = 0;
+      req_task->prm_num = 0;
+    } else {
+      return 0;  /* no more request stream */
+    }
+    job->req_msg_num++;
   }
 
   /* send new request */
@@ -372,19 +479,29 @@ static int response_cb(h2_peer *peer, h2_msg *rsp, void *peer_user_data,
     h2_dump_msg(stdout, req, "", "REQUEST[%d/%d,%d]",
                 req_task->req_id, req_task->req_step, req_task->par_idx);
   }
-  h2_peer_send_request(peer, req, NULL, req_task);
-  h2_msg_free(req);
-  return 0;
-}
+  if (long_tr_thr_msec) {
+    gettimeofday(&req_task->req_tv, NULL);
+  }
+  req_task->req = req;  /* to be freed in response_cb */
+  h2_send_request(peer, req, response_cb, req_task);
+  req_counting_update(job);
+  /* may need to handle h2_send_request() error case */
 
-static void push_strm_free_cb(h2_strm *strm, void *user_data) {
-  (void)strm;  
-  free(user_data); 
+  /* check for all request sent, then terminate marking no more request */
+  if (job->req_msg_num >= job->req_msg_max) {
+    int i;
+    for (i = 0; i < svr_peer_num; i++) {
+      h2_terminate(svr_peers[i].peer, 1);
+    }
+    req_counting_line_clear();
+  }
+
+  return 0;
 }
 
 static int push_promise_cb(h2_peer *peer, h2_msg *prm_req,
                            void *peer_user_data, void *strm_user_data,
-                           h2_strm_free_cb *push_strm_free_cb_ret,
+                           h2_response_cb *push_response_cb_ret,
                            void **push_strm_user_data_ret) {
   req_task_t *req_task = strm_user_data;
   (void)peer;
@@ -398,7 +515,7 @@ static int push_promise_cb(h2_peer *peer, h2_msg *prm_req,
                 req_task->prm_num, h2_path(prm_req));
   }
 
-  *push_strm_free_cb_ret = push_strm_free_cb;
+  *push_response_cb_ret = push_response_cb;
   *push_strm_user_data_ret = strdup(h2_path(prm_req));
   return 0;
 }
@@ -430,7 +547,7 @@ static void help(char *prog) {
   fprintf(stderr, "  -C req_max_count      # default:1; 0 for idle conn\n");
   fprintf(stderr, "  -T req_tps            # request tps; 0 for unlimited; default:0\n");
   fprintf(stderr, "  -S sess_per_peer      # sessions per server: default:1\n");
-  fprintf(stderr, "  -L req_thr_for_reconn # default:0(unlimited)\n");
+  fprintf(stderr, "  -L req_max_per_sess   # default:0(unlimited)\n");
   fprintf(stderr, "  -R symbol=format      # replace symbol by format on req_id / modular M\n");
   fprintf(stderr, "  -M modular_base       # modular to be applied on req_id for -R; 0: unlimited\n");
 #ifdef TLS_MODE
@@ -447,6 +564,7 @@ static void help(char *prog) {
   fprintf(stderr, "  -1                    # use HTTP/1.1 instead of HTTP/2\n");
   fprintf(stderr, "  -Q                    # h2sim io quiet mode\n");
   fprintf(stderr, "  -q                    # all quiet mode\n");
+  fprintf(stderr, "  -D threshold_msec     # show long transactions\n");
   fprintf(stderr, "request_options:\n");
   fprintf(stderr, "  # -m starts each request step\n");
   fprintf(stderr, "  # previous step's -s and -a are used if not specifiied\n");
@@ -499,11 +617,11 @@ h2_ctx *ctx = NULL;
 
 void sighdlr_mark_stop(int signo) {
   (void)signo;
+  service_flag = 0;
   h2_ctx_stop(ctx);
 }
 
 int main(int argc, char **argv) {
-  int verbose_h2 = 1;
 #ifdef TLS_MODE
   char *key_file = "eckey.pem";    /* default private key file */
   char *cert_file = "eccert.pem";  /* default certificate file */
@@ -515,7 +633,7 @@ int main(int argc, char **argv) {
     .req_tps = 0,
   };
   int sess_per_svr = 1;
-  int req_thr_for_reconn = 0; /* 0:unlimited */
+  int req_max_per_sess = 0; /* 0:unlimited */
   void *body;
   int body_len;
   int http_ver = H2_HTTP_V2;
@@ -534,7 +652,7 @@ int main(int argc, char **argv) {
 
   int c;
   char scale;
-  while ((c = getopt(argc, argv, "P:C:T:S:R:M:k:c:V:H:L:1Qqm:u:s:a:p:x:t:b:f:e:h")) >= 0) {
+  while ((c = getopt(argc, argv, "P:C:T:S:L:R:M:k:c:V:H:1QqD:m:u:s:a:p:x:t:b:f:e:h")) >= 0) {
     switch (c) {
     /* client run options */
     case 'P':  /* concurrent requests (ie. streams) */
@@ -556,7 +674,7 @@ int main(int argc, char **argv) {
       sess_per_svr = atoi(optarg);
       break;
     case 'L':
-      req_thr_for_reconn = atoi(optarg);
+      req_max_per_sess = atoi(optarg);
       break;
     case 'R':
       if (get_replace_symbol(optarg, &job) < 0) {
@@ -583,6 +701,7 @@ int main(int argc, char **argv) {
                 optarg);
         return EXIT_FAILURE;
       }
+      break;
     case '1':
       http_ver = H2_HTTP_V1_1;
       break;
@@ -592,6 +711,9 @@ int main(int argc, char **argv) {
     case 'q':
       verbose_h2 = 0;
       verbose = 0;
+      break;
+    case 'D':
+      long_tr_thr_msec = atoi(optarg);
       break;
 
     /* request step options */
@@ -740,11 +862,12 @@ int main(int argc, char **argv) {
       fprintf(stderr, "NEW SERVER PEER: %s://%s\n", scheme, authority);
       svr_peers[j].scheme = scheme;
       svr_peers[j].authority = authority;
-      svr_peers[j].peer = h2_peer_connect(sess_per_svr, req_thr_for_reconn,
-                              ctx, authority,
+      svr_peers[j].peer = h2_connect(
+                              ctx, 
                               !strcasecmp(scheme, "https")? ssl_ctx : NULL,
-                              &settings,
-                              response_cb, push_promise_cb, push_response_cb,
+                              authority,
+                              sess_per_svr, req_max_per_sess,
+                              &settings, push_promise_cb,
                               NULL/* job is static */, &job);
       if (svr_peers[j].peer == NULL) {
         fprintf(stderr, "connect failed to server: %s\n", authority);

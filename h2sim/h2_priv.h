@@ -169,6 +169,8 @@ void h2_msg_clean_static(h2_msg *msg);
 void h2_sess_mark_send_pending(h2_sess *sess);
 void h2_sess_clear_send_pending(h2_sess *sess);
 
+void h2_peer_sess_free_hdlr(h2_peer *peer, h2_sess *sess);
+
 
 /*
  * HTTP/2 Handlers: defined in "h2_v2.c" -----------------------------------
@@ -176,19 +178,21 @@ void h2_sess_clear_send_pending(h2_sess *sess);
 
 /* send message */
 int h2_send_request_v2(h2_sess *sess, h2_msg *req,
-                       h2_strm_free_cb strm_free_cb, void *strm_user_data);
+                       h2_response_cb response_cb, void *strm_user_data);
 int h2_send_response_v2(h2_sess *sess, h2_strm *strm, h2_msg *rsp);
 int h2_send_push_promise_v2(h2_sess *sess, h2_strm *request_strm,
                             h2_msg *prm_req, h2_msg *prm_rsp);
+int h2_send_rst_stream_v2(h2_sess *sess, h2_strm *strm);
 
 /* io */
 int h2_sess_send_once_v2(h2_sess *sess);
-int h2_sess_send_settings(h2_sess *sess, h2_settings *settings);
+int h2_sess_send_settings_v2(h2_sess *sess);
 int h2_sess_recv_v2(h2_sess *sess, const void *data, int size);
 /* sess manange */
 void h2_sess_init_v2(h2_sess *sess);
 void h2_sess_free_v2(h2_sess *sess);
-void h2_sess_term_v2(h2_sess *sess);
+void h2_sess_terminate_v2(h2_sess *sess);
+void h2_sess_shutdown_send_v2(h2_sess *sess);
 
 
 /*
@@ -197,57 +201,69 @@ void h2_sess_term_v2(h2_sess *sess);
 
 /* send message */
 int h2_send_request_v1_1(h2_sess *sess, h2_msg *req,
-                         h2_strm_free_cb strm_free_cb, void *strm_user_data);
-
+                         h2_response_cb response_cb, void *strm_user_data);
 int h2_send_response_v1_1(h2_sess *sess, h2_strm *strm, h2_msg *rsp);
 
 /* io */
 int h2_sess_send_once_v1_1(h2_sess *sess);
 int h2_sess_recv_v1_1(h2_sess *sess, const void *data, int size);
 /* sess manange */
-void h2_sess_term_v1_1(h2_sess *sess);
+void h2_sess_terminate_v1_1(h2_sess *sess);
+void h2_sess_shutdown_send_v1_1(h2_sess *sess);
 
 
 /*
  * Stream Utilities --------------------------------------------------------
  */
 
-/* read buffer for message body send handling */
-typedef struct h2_read_buf {
+/* memory buffer for message body send handling */
+typedef struct h2_send_buf {
   unsigned char *data;
   int data_size;
   int data_used;
   int to_be_freed;
-  int send_msg_type;        /* H2_REQUEST/RESPONSE/PUSH_PROMISE/PUSH_RESPONSE */
-} h2_read_buf;
+  int msg_type;             /* H2_REQUEST/RESPONSE/PUSH_PROMISE/PUSH_RESPONSE */
+} h2_send_buf;
 
 struct h2_strm {
   h2_obj obj;
   h2_strm *prev, *next;
-
+  
   int stream_id;
   int send_msg_type;        /* H2_REQUEST/H2_RESPONSE/H2_PUSH_PROMISE */
   int recv_msg_type;
   h2_msg *rmsg;
-  h2_read_buf send_body_rb; /* server: response body, client: request body */
-                            /* send data buffer for nghttp2_data_provider */
-                            /* .data is to freed at delete strm */
- 
-  h2_strm_free_cb strm_free_cb;
+  h2_send_buf send_body_sb; /* for HTTP/2: */
+                            /*   server: response body, client: request body */
+                            /*   send data buffer for nghttp2_data_provider */
+                            /*   .data is to freed at delete strm */
+                            /* for HTTP/1.1: message to send */ 
+
+  h2_response_cb response_cb; 
   void *user_data;          /* for client stream only; set at request submit */
 
   int is_req;               /* set whee strm is created by h2_send_request() */
-  int response_set;         /* set when h2_send_response() is called */
+  int is_rsp_set;           /* set when h2_send_response() is called (server) */
+                            /* or reponse callback called (client) */
+
+  /* for http/1.1 Connection: close handling */
+  int close_sess;           /* close session after handling this session */
 };
 
 /* create strm and append to sess */
 h2_strm *h2_strm_init(h2_sess *sess, int stream_id, int recv_msg_type,
-                      h2_strm_free_cb strm_free_cb, void *strm_user_data);
+                      h2_response_cb response_cb, void *strm_user_data);
 void h2_strm_free(h2_strm *strm);
 
-/* internal message recv event handler */
+/* receive message event handler */
 int h2_on_request_recv(h2_sess *sess, h2_strm *strm);
 int h2_on_response_recv(h2_sess *sess, h2_strm *strm);
+
+/* HTTP/2-only receive message event handler */
+int h2_on_rst_stream_recv(h2_sess *sess, h2_strm *strm);
+int h2_on_push_promise_recv(h2_sess *sess, h2_strm *req_strm,
+                            h2_strm *prm_strm);
+int h2_on_push_response_recv(h2_sess *sess, h2_strm *prm_strm);
 
 
 /*
@@ -286,13 +302,15 @@ typedef struct h2_wr_buf {
 struct h2_sess {
   h2_obj obj;
   h2_sess *prev, *next;
+
   h2_ctx *ctx;
+  h2_peer *peer;            /* for client session */
   int http_ver;             /* H2_HTTP_V* */
   int is_server;
+  h2_settings settings;
 
   h2_strm strm_list_head;
 
-  struct nghttp2_session *ng_sess;
   SSL *ssl;                 /* non-NULL for tsl sess only */
   int fd;                   /* connected socket fd */
   int close_reason;         /* CLOSE_BY_* */
@@ -300,7 +318,7 @@ struct h2_sess {
 
   h2_wr_buf wr_buf;         /* write buffer for nonblocking send */
   int send_pending;         /* mark when send skipping by would block */
-  int send_data_remain;     /* sum of h2_read_buf remains to be sent */
+  int send_data_remain;     /* sum of h2_send_buf remains to be sent */
 
   int req_cnt;              /* HTTP/2: client only; HTTP/1.1: both */
   int rsp_cnt;              /* HTTP/2: client only; HTTP/1.1: both */
@@ -310,7 +328,12 @@ struct h2_sess {
   struct timeval tv_begin;
   struct timeval tv_end;
 
-  int is_terminated;        /* 1:immediate, 2:wait_rsp */
+  int is_terminated;
+  int is_no_more_req;
+  int is_shutdown_send_called;
+
+  /* HTTP/2 nghttp2 session context */
+  struct nghttp2_session *ng_sess;
 
   /* HTTP/1.1 receive parser context */
   /* received data buffer */
@@ -329,16 +352,10 @@ struct h2_sess {
   /* HTTP/1.1 send message status */
   h2_strm *strm_sending;    /* maintained for client request send */
 
-  /* server callbacks */
+  /* server session only */
   h2_request_cb request_cb;
-  /* client callbacks */
-  h2_response_cb response_cb;
-  h2_push_promise_cb push_promise_cb;
-  h2_push_response_cb push_response_cb;
-
-  /* user data */
   h2_sess_free_cb sess_free_cb;
-  void *user_data;
+  void *user_data;   /* NOTE: on client session, peer->user_data is used */
 };
 
 /* sess management */
@@ -360,17 +377,16 @@ struct h2_peer {
   h2_ctx *ctx;
 
   int sess_num;
-  int req_thr_for_reconn;
+  int req_max_per_sess;
 
-  int is_terminated;        /* 1:immediate, 2:wait_rsp */
+  int is_terminated;
+  int is_no_more_req;
 
   /* configuration for client session */
   char *authority;          /* dyanmic alloced */
   SSL_CTX *ssl_ctx;
   h2_settings settings;
-  h2_peer_response_cb response_cb;
-  h2_peer_push_promise_cb push_promise_cb;
-  h2_peer_push_response_cb push_response_cb;
+  h2_push_promise_cb push_promise_cb;
   h2_peer_free_cb peer_free_cb;
   void *user_data;
 
