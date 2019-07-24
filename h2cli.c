@@ -388,7 +388,8 @@ static int start_request(client_job_t *job) {
   }
 
   /* check for all request sent, then terminate marking no more request */
-  if (job->req_msg_num >= job->req_msg_max) {
+  if (job->req_msg_num >= job->req_msg_max &&
+      job->req_msg_max != 0/* to allow -C 0 test case */) {
     for (i = 0; i < svr_peer_num; i++) {
       h2_terminate(svr_peers[i].peer, 1);
     }

@@ -500,6 +500,10 @@ void h2_sess_free(h2_sess *sess) {
     sess->fd = -1;
   }
 
+  /* mark for no more operations */
+  sess->is_no_more_req = 1;
+  sess->is_terminated = 1;
+
   if (sess->ng_sess) {
     h2_sess_free_v2(sess);
     sess->ng_sess = NULL;
