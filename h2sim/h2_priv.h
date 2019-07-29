@@ -328,6 +328,7 @@ struct h2_sess {
   struct timeval tv_begin;
   struct timeval tv_end;
 
+  int is_req_max_reconn;    /* mark to be terminated for req_max_per_sess */
   int is_terminated;
   int is_no_more_req;
   int is_shutdown_send_called;
@@ -376,12 +377,6 @@ struct h2_peer {
   struct h2_peer *prev, *next;
   h2_ctx *ctx;
 
-  int sess_num;
-  int req_max_per_sess;
-
-  int is_terminated;
-  int is_no_more_req;
-
   /* configuration for client session */
   char *authority;          /* dyanmic alloced */
   SSL_CTX *ssl_ctx;
@@ -395,6 +390,10 @@ struct h2_peer {
   int next_sess_idx;
   int *act_sess;            /* dynamic int[sess_num]; mark in act_sess_num */
   int act_sess_num;         /* number of connected sessions */
+  int reconn_num;           /* number of session reconnect tried */
+
+  int is_terminated;
+  int is_no_more_req;
 
   /* performance counts */
   int req_cnt;              /* HTTP/2: client only; HTTP/1.1: both */

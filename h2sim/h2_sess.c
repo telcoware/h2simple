@@ -153,7 +153,7 @@ static int h2_sess_send_request(h2_sess *sess, h2_msg *req,
 int h2_send_request(h2_peer *peer, h2_msg *req,
                     h2_response_cb response_cb, void *strm_user_data) {
   h2_sess *sess = NULL;
-  int i, r, n = peer->sess_num, nsi = peer->next_sess_idx;
+  int i, r, n = peer->settings.sess_num, nsi = peer->next_sess_idx;
 
   if (peer->is_terminated || peer->is_no_more_req) {
     warnx("cannot send request for peer is terminated: %s\n", peer->authority);
@@ -165,14 +165,15 @@ int h2_send_request(h2_peer *peer, h2_msg *req,
     int si = (nsi + i) % n;
     if ((sess = peer->sess[si]) && peer->act_sess[si])  {
       /* house keep for to-be-terminated of HTTP/2 */
-      if (peer->req_max_per_sess > 0 &&
-          sess->req_cnt >= peer->req_max_per_sess &&
-          peer->act_sess_num >= peer->sess_num) {
+      if (peer->settings.req_max_per_sess > 0 &&
+          sess->req_cnt >= peer->settings.req_max_per_sess &&
+          peer->act_sess_num >= peer->settings.sess_num) {
         /* terminate for too may requests handled */
         if (peer->act_sess[si]) {  /* update before sess terminate call */
           peer->act_sess[si] = 0;
           peer->act_sess_num--;
         }
+        sess->is_req_max_reconn = 1;
         h2_sess_terminate(sess, 1/* wait_rsp */);
         sess = NULL;  /* try other sess */
       } else {
@@ -195,7 +196,7 @@ int h2_send_request(h2_peer *peer, h2_msg *req,
   }
 
   /* try to house keep till act_sess_num */
-  if (sess && peer->act_sess_num < peer->sess_num) {
+  if (sess && peer->act_sess_num < peer->settings.sess_num) {
     /* TODO: try to connect server */
   }
 
@@ -217,7 +218,7 @@ int h2_terminate(h2_peer *peer, int wait_rsp) {
     peer->is_no_more_req = 1;
   }
 
-  for (i = 0; i < peer->sess_num; i++) {
+  for (i = 0; i < peer->settings.sess_num; i++) {
     if (peer->act_sess[i]) {
       peer->act_sess[i] = 0;
       peer->act_sess_num--;
@@ -594,6 +595,10 @@ h2_ctx *h2_sess_ctx(h2_sess *sess) {
  */
 
 void h2_settings_init(h2_settings *settings) {
+  /* Peer Session Management */
+  settings->sess_num = 1;
+  settings->reconn_max = 0;        /* no reconn */
+  settings->req_max_per_sess = 0;  /* no max check */
   /* HTTP/2 */
   settings->header_table_size = -1;
   settings->enable_push = -1;
@@ -634,8 +639,15 @@ int h2_set_settings(h2_settings *settings, char *id_value_str)
     return -1;
   }
 
+  /* Peer Sesssion Management */ 
+  if (!strcasecmp(id, "sess_num")) {
+    settings->sess_num = val;
+  } else if (!strcasecmp(id, "reconn_max")) {
+    settings->reconn_max = val;
+  } else if (!strcasecmp(id, "req_max_per_sess")) {
+    settings->req_max_per_sess = val;
   /* HTTP/2 Settings */
-  if (!strcasecmp(id, "header_table_size")) {
+  } else if (!strcasecmp(id, "header_table_size")) {
     settings->header_table_size = val;
   } else if (!strcasecmp(id, "enable_push")) {
     settings->enable_push = val;

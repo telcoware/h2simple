@@ -172,8 +172,13 @@ void h2_dump_msg(FILE *fp, h2_msg *msg, const char *line_prefix,
 #define H2_HTTP_V1_1_KEEP_ALIVE_MAX      100
 
 typedef struct h2_settings {
-  /* use value -1 for no set; ie. use default value */
+  /* Peer Session Management */
+  int sess_num;          /* default: 1 */
+  int reconn_max;        /* defualt: 0(no reconn); except req_max_reconn case */
+  int req_max_per_sess;  /* default: 0(no max check) */
+
   /* HTTP/2 Settings */
+  /* use value -1 for no set; ie. use default value */
   int header_table_size;  
   int enable_push;
   int max_concurrent_streams;
@@ -181,8 +186,9 @@ typedef struct h2_settings {
   int max_frame_size;
   int max_header_list_size;
   int enable_connect_protocol;
+
   /* HTTP/1.1 Settings */
-  int single_req;          /* default: 0(persistent) */
+  int single_req;        /* default: 0(persistent) */
 } h2_settings;
 
 void h2_settings_init(h2_settings *settings);  /* must be call before set */
@@ -226,11 +232,11 @@ typedef int (*h2_push_promise_cb)(
 
 /* client side context create api to start sessions */
 h2_peer *h2_connect(h2_ctx *ctx, SSL_CTX *cli_ssl_ctx,
-                    const char *authority, int sess_num, int req_max_per_sess,
-                    h2_settings *settings,
+                    const char *authority, h2_settings *settings,
                     h2_push_promise_cb push_promise_cb,
                     h2_peer_free_cb peer_free_cb, void *peer_user_data);
   /* NOTE: cli_ssl_ctx MUST be valid in h2_peer entry lifetime */
+  /* NOTE: req_max_per_sess can be set via settings */
   /* cli_ssl_ctx, settings might be null */
   /* req_max_per_sess 0 for unlimited */
 

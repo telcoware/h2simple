@@ -548,7 +548,6 @@ static void help(char *prog) {
   fprintf(stderr, "  -C req_max_count      # default:1; 0 for idle conn\n");
   fprintf(stderr, "  -T req_tps            # request tps; 0 for unlimited; default:0\n");
   fprintf(stderr, "  -S sess_per_peer      # sessions per server: default:1\n");
-  fprintf(stderr, "  -L req_max_per_sess   # default:0(unlimited)\n");
   fprintf(stderr, "  -R symbol=format      # replace symbol by format on req_id / modular M\n");
   fprintf(stderr, "  -M modular_base       # modular to be applied on req_id for -R; 0: unlimited\n");
 #ifdef TLS_MODE
@@ -559,9 +558,15 @@ static void help(char *prog) {
   
 #endif
   fprintf(stderr, "  -H <settings_id>=<value>   # set http2 settings value\n");
-  fprintf(stderr, "     # <settings_id> := header_table_size | enable_push |\n");
+  fprintf(stderr, "     # <settings_id> := \n");
+  fprintf(stderr, "     # Peer Session Management:\n");
+  fprintf(stderr, "     #   sess_num, reconn_max, req_max_per_sess\n");
+  fprintf(stderr, "     # HTTP/2 Settings:\n");
+  fprintf(stderr, "     #   header_table_size | enable_push |\n");
   fprintf(stderr, "     #   max_concurrent_streams, initial_window_size | max_frame_size\n");
   fprintf(stderr, "     #   max_header_list_size, enable_connect_protocol\n");
+  fprintf(stderr, "     # HTTP/1.1 Settings:\n");
+  fprintf(stderr, "     #   single_req\n");
   fprintf(stderr, "  -1                    # use HTTP/1.1 instead of HTTP/2\n");
   fprintf(stderr, "  -Q                    # h2sim io quiet mode\n");
   fprintf(stderr, "  -q                    # all quiet mode\n");
@@ -633,8 +638,6 @@ int main(int argc, char **argv) {
     .req_max = 1,
     .req_tps = 0,
   };
-  int sess_per_svr = 1;
-  int req_max_per_sess = 0; /* 0:unlimited */
   void *body;
   int body_len;
   int http_ver = H2_HTTP_V2;
@@ -653,7 +656,7 @@ int main(int argc, char **argv) {
 
   int c;
   char scale;
-  while ((c = getopt(argc, argv, "P:C:T:S:L:R:M:k:c:V:H:1QqD:m:u:s:a:p:x:t:b:f:e:h")) >= 0) {
+  while ((c = getopt(argc, argv, "P:C:T:S:R:M:k:c:V:H:1QqD:m:u:s:a:p:x:t:b:f:e:h")) >= 0) {
     switch (c) {
     /* client run options */
     case 'P':  /* concurrent requests (ie. streams) */
@@ -672,10 +675,7 @@ int main(int argc, char **argv) {
       job.req_tps = atoi(optarg);
       break;
     case 'S':
-      sess_per_svr = atoi(optarg);
-      break;
-    case 'L':
-      req_max_per_sess = atoi(optarg);
+      settings.sess_num = atoi(optarg);
       break;
     case 'R':
       if (get_replace_symbol(optarg, &job) < 0) {
@@ -864,11 +864,8 @@ int main(int argc, char **argv) {
       svr_peers[j].scheme = scheme;
       svr_peers[j].authority = authority;
       svr_peers[j].peer = h2_connect(
-                              ctx, 
-                              !strcasecmp(scheme, "https")? ssl_ctx : NULL,
-                              authority,
-                              sess_per_svr, req_max_per_sess,
-                              &settings, push_promise_cb,
+                              ctx, !strcasecmp(scheme, "https")? ssl_ctx : NULL,
+                              authority, &settings, push_promise_cb,
                               NULL/* job is static */, &job);
       if (svr_peers[j].peer == NULL) {
         fprintf(stderr, "connect failed to server: %s\n", authority);

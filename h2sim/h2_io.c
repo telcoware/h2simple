@@ -1090,12 +1090,12 @@ static h2_sess *h2_peer_connect_sess(h2_peer *peer, int sess_idx) {
 void h2_peer_sess_free_hdlr(h2_peer *peer, h2_sess *sess) {
   int i;
 
-  for (i = 0; i < peer->sess_num; i++) {
+  for (i = 0; i < peer->settings.sess_num; i++) {
     if (peer->sess[i] == sess) {
       break;
     }
   }
-  if (i >= peer->sess_num) {
+  if (i >= peer->settings.sess_num) {
     warnx("peer_sess_free_cb:: unknown session for peer: peer=%s sess=%s",
           peer->authority, sess->log_prefix);
     return;
@@ -1116,16 +1116,20 @@ void h2_peer_sess_free_hdlr(h2_peer *peer, h2_sess *sess) {
   }
 
   /* try reconnect is peer or ctx is not termiating */
-  if (!peer->is_terminated && !peer->is_no_more_req &&
-      peer->ctx->service_flag) {
+  if (peer->ctx->service_flag &&
+      !peer->is_terminated && !peer->is_no_more_req &&
+      (sess->is_req_max_reconn ||
+       peer->reconn_num < peer->settings.reconn_max)) {
+    if (!sess->is_req_max_reconn) {
+      peer->reconn_num++;
+    }
     h2_peer_connect_sess(peer, i);
   }
 }
 
 /* client side context create api to start sessions */
 h2_peer *h2_connect(h2_ctx *ctx, SSL_CTX *cli_ssl_ctx,
-                    const char *authority, int sess_num, int req_max_per_sess,
-                    h2_settings *settings,
+                    const char *authority, h2_settings *settings,
                     h2_push_promise_cb push_promise_cb,
                     h2_peer_free_cb peer_free_cb, void *peer_user_data) {
   h2_peer *peer;
@@ -1142,9 +1146,6 @@ h2_peer *h2_connect(h2_ctx *ctx, SSL_CTX *cli_ssl_ctx,
   ctx->peer_num++;
   peer->ctx = ctx;
 
-  peer->sess_num = sess_num;
-  peer->req_max_per_sess = req_max_per_sess;
-
   peer->authority = strdup(authority);
   peer->ssl_ctx = cli_ssl_ctx;
   if (settings) {
@@ -1153,9 +1154,9 @@ h2_peer *h2_connect(h2_ctx *ctx, SSL_CTX *cli_ssl_ctx,
     h2_settings_init(&peer->settings);
   }
 
-  peer->sess = calloc(sess_num, sizeof(*peer->sess));
+  peer->sess = calloc(peer->settings.sess_num, sizeof(*peer->sess));
   peer->next_sess_idx = 0;
-  peer->act_sess = calloc(sess_num, sizeof(*peer->act_sess));
+  peer->act_sess = calloc(peer->settings.sess_num, sizeof(*peer->act_sess));
   peer->act_sess_num = 0;
 
   /* mark start time */
@@ -1165,7 +1166,7 @@ h2_peer *h2_connect(h2_ctx *ctx, SSL_CTX *cli_ssl_ctx,
 
   /* connect to peer as sess_num sessions */
   int i;
-  for (i = 0; i < sess_num; i++) {
+  for (i = 0; i < peer->settings.sess_num; i++) {
     h2_peer_connect_sess(peer, i);
   }
   if (peer->act_sess_num <= 0) {
@@ -1186,7 +1187,7 @@ void h2_peer_free(h2_peer *peer) {
   int i;
 
   /* free all sessions */
-  for (i = 0; i < peer->sess_num; i++) {
+  for (i = 0; i < peer->settings.sess_num; i++) {
     if (peer->sess[i]) {
       h2_sess_free(peer->sess[i]);
       peer->sess[i] = NULL;
@@ -1215,7 +1216,7 @@ void h2_peer_free(h2_peer *peer) {
   double elapsed =
      ((peer->tv_end.tv_sec - peer->tv_begin.tv_sec) * 1.0 +
       (peer->tv_end.tv_usec - peer->tv_begin.tv_usec) * 0.000001);
-  if (peer->sess_num > 1) {
+  if (peer->settings.sess_num > 1) {
     fprintf(stderr, "PEER CLOSED %s: %.0f tps (%.3f secs for "
             "%d reqs %d rsps(%d rsts) %d streams in %d sessions)%s\n",
             peer->authority, peer->strm_close_cnt / elapsed,
