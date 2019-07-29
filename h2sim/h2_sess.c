@@ -604,8 +604,6 @@ void h2_settings_init(h2_settings *settings) {
   settings->enable_connect_protocol = -1;
   /* HTTP/1.1 */
   settings->single_req = 0;
-  settings->keep_alive_timeout = H2_HTTP_V1_1_KEEP_ALIVE_TIMEOUT;
-  settings->keep_alive_max = H2_HTTP_V1_1_KEEP_ALIVE_MAX;
 }
 
 int h2_set_settings(h2_settings *settings, char *id_value_str)
@@ -654,10 +652,6 @@ int h2_set_settings(h2_settings *settings, char *id_value_str)
   /* HTTP/1.1 Settings */ 
   } else if (!strcasecmp(id, "single_request")) {
     settings->single_req = val;
-  } else if (!strcasecmp(id, "keep_alive_timeout")) {
-    settings->keep_alive_timeout = val;
-  } else if (!strcasecmp(id, "keep_alive_max")) {
-    settings->keep_alive_max = val;
   } else {
     warnx("set settings: unknown setting identifier: %s", id);
     free(str);

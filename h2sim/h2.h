@@ -183,8 +183,6 @@ typedef struct h2_settings {
   int enable_connect_protocol;
   /* HTTP/1.1 Settings */
   int single_req;          /* default: 0(persistent) */
-  int keep_alive_timeout;  /* seconds; server_only; default: 15 */
-  int keep_alive_max;      /* seconds; server_only; default: 100 */
 } h2_settings;
 
 void h2_settings_init(h2_settings *settings);  /* must be call before set */

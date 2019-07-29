@@ -404,6 +404,10 @@ static int response_cb(h2_peer *peer, h2_msg *rsp, void *peer_user_data,
   req_task_t *req_task = strm_user_data;
   (void)rsp;
 
+  if (!service_flag) {
+    return 0;  /* just ignore on service stop */
+  }
+
   /* check for long traction report case */
   if (long_tr_thr_msec) {
     struct timeval cur_tv, req_tv = req_task->req_tv;
@@ -443,10 +447,6 @@ static int response_cb(h2_peer *peer, h2_msg *rsp, void *peer_user_data,
   if (req_task->req) {
     h2_msg_free(req_task->req);
     req_task->req = NULL;
-  }
-
-  if (!service_flag) {
-    return 0;  /* just ignore on service stop */
   }
 
   if (rsp == NULL) {
