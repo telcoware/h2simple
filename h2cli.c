@@ -661,7 +661,7 @@ int main(int argc, char **argv) {
 
   int c;
   char scale;
-  while ((c = getopt(argc, argv, "P:C:T:S:R:M:k:c:V:H:1QqD:m:u:s:a:p:x:t:b:f:e:h")) >= 0) {
+  while ((c = getopt(argc, argv, "P:C:T:S:R:M:k:c:V:H:1QqD:rm:u:s:a:p:x:t:b:f:e:h")) >= 0) {
     switch (c) {
     /* client run options */
     case 'P':  /* concurrent requests (ie. streams) */
