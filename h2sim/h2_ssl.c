@@ -119,6 +119,10 @@ SSL_CTX *h2_ssl_ctx_init(int is_server/* else client */,
                       SSL_OP_NO_COMPRESSION |
                       SSL_OP_NO_SESSION_RESUMPTION_ON_RENEGOTIATION);
 
+#if OPENSSL_VERSION_NUMBER >= 0x10101000L
+  //SSL_CTX_set_min_proto_version(ssl_ctx, TLS1_3_VERSION);  
+#endif
+
   /* FROM: 3GPP 33.210-f20 6.2 TLS protocol profiles */
   /* for TLSv1.2 */
   SSL_CTX_set_cipher_list(ssl_ctx,
@@ -127,7 +131,7 @@ SSL_CTX *h2_ssl_ctx_init(int is_server/* else client */,
     "ECDHE-ECDSA-AES256-GCM-SHA384:"
     "ECDHE-RSA-AES256-GCM-SHA384");
   /* for TLSv1.3 */
-  /* SSL_CTX_set_ciphersuites(ssl_ctx, ""); */
+  /* SSL_CTX_set_ciphersuites(ssl_ctx, ...); */  /* NOTE: auto inserted */
   /* default: TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:  */
   /*          TLS_AES_128_GCM_SHA256 */
 

@@ -56,6 +56,7 @@ int service_flag = 1;
 int verbose = 1;           /* h2cli verbose */
 int verbose_h2 = 1;        /* h2sim verbose */
 int long_tr_thr_msec = 0;  /* long transaction detection; 0:disabled */
+int retry_on_rst_stream = 0;
 
 #define CLIENT_JOB_REPL_SYM_MAX  16    /* replace symbol max */
                                        /* MUST be < 32 for repl_sym_idx_mask */
@@ -450,15 +451,18 @@ static int response_cb(h2_peer *peer, h2_msg *rsp, void *peer_user_data,
   }
 
   if (rsp == NULL) {
-    fprintf(stdout, "DETECT STREAM CLOSED; RETRY REQUEST[%d/%d,%d]\n",
+    fprintf(stdout, "DETECT STREAM CLOSED; %s REQUEST[%d/%d,%d]\n",
+            (retry_on_rst_stream)? "RETRY" : "HANDLE AS ERROR RESPONSE ON",
             req_task->req_id, req_task->req_step, req_task->par_idx);
   } else {
     if (verbose) {    
       h2_dump_msg(stdout, rsp, "", "RESPONSE[%d/%d,%d]",
                   req_task->req_id, req_task->req_step, req_task->par_idx);
     }
-    job->rsp_msg_num++;  /* NOTE: RST_STREAM is also counted as rsp */
+  }
 
+  if (rsp || !retry_on_rst_stream) {
+    job->rsp_msg_num++;
     /* prepare new request */
     if (req_task->req_step + 1 < job->req_step_num) {
       req_task->req_step += 1;
@@ -571,6 +575,7 @@ static void help(char *prog) {
   fprintf(stderr, "  -Q                    # h2sim io quiet mode\n");
   fprintf(stderr, "  -q                    # all quiet mode\n");
   fprintf(stderr, "  -D threshold_msec     # show long transactions\n");
+  fprintf(stderr, "  -r # retry request on rst stream; default:handle-as-error-response\n");
   fprintf(stderr, "request_options:\n");
   fprintf(stderr, "  # -m starts each request step\n");
   fprintf(stderr, "  # previous step's -s and -a are used if not specifiied\n");
@@ -715,6 +720,9 @@ int main(int argc, char **argv) {
       break;
     case 'D':
       long_tr_thr_msec = atoi(optarg);
+      break;
+    case 'r':
+      retry_on_rst_stream = 1;
       break;
 
     /* request step options */
